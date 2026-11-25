@@ -14,6 +14,7 @@ Future<void> main() async {
   await TempFiles.clearAll();
   final roots = await Storage.roots();
   await services.ftp.load(roots.first.path);
+  await services.known.load();
   runApp(const BestandskluisApp());
 }
 

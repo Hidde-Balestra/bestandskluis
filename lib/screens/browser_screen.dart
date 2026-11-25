@@ -10,6 +10,7 @@ import '../crypto/vault_manager.dart';
 import '../services/storage.dart';
 import '../services/temp_files.dart';
 import '../util/format.dart';
+import '../widgets/app_logo.dart';
 import '../widgets/dialogs.dart';
 import 'media_viewer.dart';
 
@@ -70,12 +71,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
   void initState() {
     super.initState();
     vaults.addListener(_reload);
+    services.known.addListener(_reload);
     _init();
   }
 
   @override
   void dispose() {
     vaults.removeListener(_reload);
+    services.known.removeListener(_reload);
     super.dispose();
   }
 
@@ -161,14 +164,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final ok = await runWithProgress(
         context, 'Ontgrendelen…', (_) => vaults.unlock(root, pw));
     if (ok == false && mounted) showMessage(context, 'Onjuist wachtwoord');
+    if (ok == true) await services.known.add(root);
     return ok == true;
   }
 
-  Future<void> _createVault(FsItem item) async {
+  /// Bestaande map (met inhoud) omzetten naar een kluis.
+  Future<void> _createVault(String path) async {
     final ok = await confirmDialog(context,
         title: 'Map versleutelen',
         message:
-            'Alle bestanden in "${item.name}" (ook in submappen) worden met AES-256 '
+            'Alle bestanden in "${p.basename(path)}" (ook in submappen) worden met AES-256 '
             'versleuteld. Zonder het wachtwoord zijn ze niet meer te openen — '
             'er is geen herstelmogelijkheid.',
         confirm: 'Doorgaan');
@@ -178,10 +183,103 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (pw == null || !mounted) return;
     await runWithProgress(context, 'Versleutelen…', (update) async {
       update('Sleutel afleiden…');
-      await vaults.create(item.path, pw,
+      await vaults.create(path, pw,
           onProgress: (d, t, n) => update('$d / $t\n$n'));
+      await services.known.add(path);
     });
     _reload();
+  }
+
+  /// Standaardlocatie voor nieuwe kluizen vanaf het startscherm.
+  String? get _defaultVaultParent =>
+      _roots.isEmpty ? null : p.join(_roots.first.path, 'Kluizen');
+
+  /// Nieuwe, lege kluis maken in [parent] (standaard de huidige map, of
+  /// "Kluizen" in de interne opslag) en die openen.
+  Future<void> _newVault([String? parent]) async {
+    parent ??= _dir ?? _defaultVaultParent;
+    if (parent == null) return;
+    if (vaults.vaultRootFor(parent) != null) {
+      showMessage(context, 'Een kluis kan niet in een andere kluis liggen');
+      return;
+    }
+    final name = (await askText(context,
+            title: 'Nieuwe kluis', initial: 'Mijn kluis', confirm: 'Volgende'))
+        ?.trim();
+    if (name == null || name.isEmpty || !mounted) return;
+    if (name.contains('/') || name.startsWith('.')) {
+      showMessage(context, 'Ongeldige naam');
+      return;
+    }
+    final dir = Directory(p.join(parent, name));
+    if (dir.existsSync()) {
+      showMessage(context, 'Er bestaat al een map "$name"');
+      return;
+    }
+    final pw = await askPassword(context,
+        title: 'Wachtwoord voor "$name"',
+        repeat: true,
+        message: 'Zonder dit wachtwoord zijn de bestanden niet meer te '
+            'openen. Er is geen herstelmogelijkheid.');
+    if (pw == null || !mounted) return;
+    final ok = await runWithProgress(context, 'Kluis maken…', (update) async {
+      update('Sleutel afleiden…');
+      await dir.create(recursive: true);
+      try {
+        await vaults.create(dir.path, pw);
+      } catch (_) {
+        await dir.delete(recursive: true);
+        rethrow;
+      }
+      await services.known.add(dir.path);
+      return true;
+    });
+    if (ok == true && mounted) {
+      await _open(dir.path);
+      if (mounted) {
+        showMessage(context,
+            'Kluis "$name" gemaakt. Bestanden die je hier plakt worden versleuteld.');
+      }
+    }
+  }
+
+  void _newMenu() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.create_new_folder_outlined),
+            title: const Text('Nieuwe map'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _newFolder();
+            },
+          ),
+          if (!_inVault) ...[
+            ListTile(
+              leading: const Icon(Icons.enhanced_encryption_outlined),
+              title: const Text('Nieuwe kluis'),
+              subtitle: const Text('Lege versleutelde map met wachtwoord'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _newVault();
+              },
+            ),
+            if (_dir != null && !_roots.any((r) => p.equals(r.path, _dir!)))
+              ListTile(
+                leading: const Icon(Icons.lock_outline),
+                title: const Text('Deze map versleutelen'),
+                subtitle: Text(p.basename(_dir!)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _createVault(_dir!);
+                },
+              ),
+          ],
+        ]),
+      ),
+    );
   }
 
   Future<void> _removeVault(String root) async {
@@ -195,6 +293,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     await runWithProgress(context, 'Ontsleutelen…', (update) async {
       await vaults.removeVault(root,
           onProgress: (d, t, n) => update('$d / $t\n$n'));
+      await services.known.remove(root);
     });
   }
 
@@ -306,7 +405,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (name == null || name.isEmpty || name == item.name || !mounted) return;
     try {
       await services.ops.rename(item.entity, name);
-      if (item.isVault) vaults.lock(item.path);
+      if (item.isVault) {
+        vaults.lock(item.path);
+        await services.known.remove(item.path);
+        await services.known.add(p.join(p.dirname(item.path), name));
+      }
     } catch (e) {
       if (mounted) showError(context, e);
     }
@@ -387,7 +490,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       case 'delete':
         await _delete([item]);
       case 'encrypt':
-        await _createVault(item);
+        await _createVault(item.path);
       case 'lock':
         vaults.lock(item.path);
         await TempFiles.clearViewCache();
@@ -422,8 +525,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   Widget? _fab() {
-    if (_dir == null || _selecting || _vaultLocked || widget.pickFileMode) {
+    if (_selecting || _vaultLocked || widget.pickFileMode || !_permission) {
       return null;
+    }
+    if (_dir == null) {
+      if (_defaultVaultParent == null) return null;
+      return FloatingActionButton.extended(
+        onPressed: () => _newVault(),
+        icon: const Icon(Icons.enhanced_encryption_outlined),
+        label: const Text('Nieuwe kluis'),
+      );
     }
     if (services.clipboard.isNotEmpty) {
       return FloatingActionButton.extended(
@@ -432,7 +543,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
         label: Text('Plakken (${services.clipboard.length})'),
       );
     }
-    return null;
+    return FloatingActionButton(
+      tooltip: 'Nieuw',
+      onPressed: _newMenu,
+      child: const Icon(Icons.add),
+    );
   }
 
   PreferredSizeWidget _selectionBar() {
@@ -521,6 +636,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
               switch (a) {
                 case 'folder':
                   await _newFolder();
+                case 'vault':
+                  await _newVault();
+                case 'encryptHere':
+                  await _createVault(dir);
                 case 'hidden':
                   setState(() => _showHidden = !_showHidden);
                   _reload();
@@ -538,6 +657,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
             itemBuilder: (_) => [
               if (!_vaultLocked)
                 const PopupMenuItem(value: 'folder', child: Text('Nieuwe map')),
+              if (root == null) ...[
+                const PopupMenuItem(value: 'vault', child: Text('Nieuwe kluis')),
+                if (!_roots.any((r) => p.equals(r.path, dir)))
+                  const PopupMenuItem(
+                      value: 'encryptHere',
+                      child: Text('Deze map versleutelen')),
+              ],
               CheckedPopupMenuItem(
                   value: 'hidden',
                   checked: _showHidden,
@@ -626,8 +752,72 @@ class _BrowserScreenState extends State<BrowserScreen> {
         if (Directory(path).existsSync()) quick.add((name, icon, path));
       }
     }
-    final unlocked = vaults.unlockedVaults.toList();
-    return ListView(children: [
+    final known = services.known.paths;
+    final myVaults = [
+      ...known,
+      ...vaults.unlockedVaults.where((v) => !known.any((k) => p.equals(k, v))),
+    ];
+    final scheme = Theme.of(context).colorScheme;
+    return ListView(padding: const EdgeInsets.only(bottom: 88), children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        child: Row(children: [
+          const AppLogo(size: 52),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Bestandskluis',
+                  style: Theme.of(context).textTheme.titleLarge),
+              Text('Bestanden, galerij, FTP en versleutelde mappen',
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant)),
+            ]),
+          ),
+        ]),
+      ),
+      const ListTile(dense: true, title: Text('Mijn kluizen')),
+      if (myVaults.isEmpty)
+        Card(
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Nog geen kluizen. Een kluis is een map waarvan de '
+                  'bestanden met je wachtwoord worden versleuteld.'),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () => _newVault(),
+                icon: const Icon(Icons.enhanced_encryption_outlined),
+                label: const Text('Kluis maken'),
+              ),
+            ]),
+          ),
+        ),
+      for (final v in myVaults)
+        ListTile(
+          leading: Icon(vaults.isUnlocked(v) ? Icons.lock_open : Icons.lock,
+              color: scheme.tertiary),
+          title: Text(p.basename(v)),
+          subtitle: Text(v, overflow: TextOverflow.ellipsis),
+          onTap: () async {
+            if (!vaults.isUnlocked(v) && !await _unlock(v)) return;
+            _open(v);
+          },
+          trailing: vaults.isUnlocked(v)
+              ? IconButton(
+                  tooltip: 'Vergrendelen',
+                  icon: const Icon(Icons.lock),
+                  onPressed: () {
+                    vaults.lock(v);
+                    TempFiles.clearViewCache();
+                  },
+                )
+              : null,
+        ),
+      const Divider(),
+      const ListTile(dense: true, title: Text('Opslag')),
       for (final r in _roots)
         ListTile(
           leading: const Icon(Icons.smartphone),
@@ -639,25 +829,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
       for (final (name, icon, path) in quick)
         ListTile(
             leading: Icon(icon), title: Text(name), onTap: () => _open(path)),
-      if (unlocked.isNotEmpty) ...[
-        const Divider(),
-        const ListTile(dense: true, title: Text('Ontgrendelde kluizen')),
-        for (final v in unlocked)
-          ListTile(
-            leading: const Icon(Icons.lock_open),
-            title: Text(p.basename(v)),
-            subtitle: Text(v),
-            onTap: () => _open(v),
-            trailing: IconButton(
-              tooltip: 'Vergrendelen',
-              icon: const Icon(Icons.lock),
-              onPressed: () {
-                vaults.lock(v);
-                TempFiles.clearViewCache();
-              },
-            ),
-          ),
-      ],
     ]);
   }
 

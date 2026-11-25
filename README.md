@@ -1,3 +1,5 @@
+<img src="docs/logo.png" alt="" width="96" align="right">
+
 # Bestandskluis
 
 Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP-server en versleutelde mappen combineert.
@@ -22,7 +24,9 @@ Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP-serv
 - Tabblad **Kluizen**: foto's en video's uit ontgrendelde kluizen
 
 ### Versleutelde mappen (kluizen)
-- Elke map kan een kluis worden: **Map versleutelen** in het menu van de map
+- **Nieuwe kluis**: op het startscherm (knop *Nieuwe kluis*, komt in `Kluizen/` in de interne opslag) of in elke map via de **+**-knop. Je kiest een naam en een wachtwoord en de lege kluis wordt meteen geopend.
+- Bestaande map versleutelen: **Map versleutelen** in het menu van de map, of **+ → Deze map versleutelen**
+- **Mijn kluizen** op het startscherm: alle kluizen, ook vergrendelde; tikken = ontgrendelen en openen
 - Bestanden in de kluis (ook in submappen) worden opgeslagen als `naam.ext.bkv`
 - Ontgrendelen met een wachtwoord; de sleutel staat alleen in het werkgeheugen
 - Bestanden die je in een kluis plakt worden automatisch versleuteld; bestanden die je eruit haalt automatisch ontsleuteld
@@ -81,3 +85,11 @@ De workflow test de code, bouwt de APK, tekent hem met de release-sleutel, contr
 - Certificaat SHA-256: `86:A8:2A:37:DB:38:3C:C8:FB:1D:0C:EC:A0:18:A2:7B:D9:B5:9C:A5:47:9F:8A:A0:97:21:FE:EA:DE:22:61:F1`
 
 Lokaal staan `android/key.properties` en `android/app/upload-keystore.jks` (beide in `.gitignore`). **Bewaar een back-up van deze twee bestanden.** Zonder dezelfde sleutel kunnen bestaande installaties niet meer worden bijgewerkt.
+
+## Logo
+
+Het logo wordt in code getekend ([lib/widgets/app_logo.dart](lib/widgets/app_logo.dart)). De Android-iconen (klassiek, adaptief en monochroom voor thema-iconen) en `docs/logo.png` genereer je opnieuw met:
+
+```bash
+flutter test tool/generate_icons_test.dart
+```
