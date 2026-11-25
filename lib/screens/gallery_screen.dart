@@ -12,6 +12,7 @@ import '../crypto/vault_manager.dart';
 import '../services/temp_files.dart';
 import '../util/format.dart';
 import '../widgets/dialogs.dart';
+import '../widgets/encrypted_thumb.dart';
 import 'media_viewer.dart';
 
 class GalleryScreen extends StatefulWidget {
@@ -113,7 +114,8 @@ class _GalleryScreenState extends State<GalleryScreen> {
           final name = p.basename(e.path);
           if (e is File &&
               VaultCrypto.isEncryptedName(name) &&
-              isMedia(VaultCrypto.plainName(name))) {
+              isMedia(VaultCrypto.plainName(
+                  name, services.vaults.keyFor(root)))) {
             files.add(e);
           }
         }
@@ -154,7 +156,8 @@ class _GalleryScreenState extends State<GalleryScreen> {
 
   void _openVaultFile(int index) {
     final items = _vaultFiles.map((f) {
-      final name = VaultCrypto.plainName(p.basename(f.path));
+      final name = VaultCrypto.plainName(
+          p.basename(f.path), services.ops.keyForFile(f));
       return MediaItem(
         name: name,
         isVideo: kindOf(name) == FileKind.video,
@@ -415,14 +418,16 @@ class _GalleryScreenState extends State<GalleryScreen> {
       itemCount: _vaultFiles.length,
       itemBuilder: (context, i) {
         final f = _vaultFiles[i];
-        final video = kindOf(p.basename(f.path)) == FileKind.video;
+        final video = kindOf(VaultCrypto.plainName(
+                p.basename(f.path), services.ops.keyForFile(f))) ==
+            FileKind.video;
         return GestureDetector(
           onTap: () => _openVaultFile(i),
           child: Container(
             color: Theme.of(context).colorScheme.surfaceContainerHighest,
             child: video
                 ? const Icon(Icons.movie, size: 40)
-                : _VaultThumb(file: f),
+                : EncryptedThumb(file: f),
           ),
         );
       },
@@ -456,25 +461,3 @@ class _AssetThumb extends StatelessWidget {
   }
 }
 
-class _VaultThumb extends StatefulWidget {
-  const _VaultThumb({required this.file});
-  final File file;
-  @override
-  State<_VaultThumb> createState() => _VaultThumbState();
-}
-
-class _VaultThumbState extends State<_VaultThumb> {
-  late final Future<File> _plain =
-      TempFiles.plainFor(widget.file, services.ops.keyForFile(widget.file));
-
-  @override
-  Widget build(BuildContext context) => FutureBuilder<File>(
-        future: _plain,
-        builder: (_, s) => s.hasData
-            ? Image.file(s.data!,
-                fit: BoxFit.cover,
-                cacheWidth: 240,
-                errorBuilder: (_, _, _) => const Icon(Icons.broken_image))
-            : const Center(child: Icon(Icons.lock)),
-      );
-}

@@ -18,6 +18,7 @@ class FtpServerConfig {
     this.allowAnonymous = false,
     this.readOnly = false,
     this.decryptVaults = true,
+    this.tls = FtpTls.optional,
   });
 
   final String rootPath;
@@ -31,7 +32,12 @@ class FtpServerConfig {
   /// ontsleuteld (en uploads versleuteld). Op schijf blijft alles versleuteld.
   final bool decryptVaults;
 
+  /// FTPS (expliciet, AUTH TLS). Werkt alleen als de server een
+  /// [SecurityContext] heeft.
+  final FtpTls tls;
+
   FtpServerConfig copyWith({
+    FtpTls? tls,
     String? rootPath,
     int? port,
     String? username,
@@ -48,7 +54,20 @@ class FtpServerConfig {
         allowAnonymous: allowAnonymous ?? this.allowAnonymous,
         readOnly: readOnly ?? this.readOnly,
         decryptVaults: decryptVaults ?? this.decryptVaults,
+        tls: tls ?? this.tls,
       );
+}
+
+/// FTPS-instelling van de server.
+enum FtpTls {
+  /// Geen TLS.
+  off,
+
+  /// TLS als de client erom vraagt (AUTH TLS).
+  optional,
+
+  /// Alleen met TLS (inloggen en gegevens).
+  required,
 }
 
 class FtpEvent {
@@ -64,13 +83,24 @@ class FtpEvent {
 /// als `foto.jpg` en wordt ontsleuteld tijdens de overdracht. Op de schijf
 /// wordt niets ontsleuteld opgeslagen.
 class FtpServer {
-  FtpServer({required this.config, required this.vaults, this.bindAddress});
+  FtpServer(
+      {required this.config,
+      required this.vaults,
+      this.bindAddress,
+      this.securityContext});
 
   final FtpServerConfig config;
   final VaultAccess vaults;
 
   /// Standaard alle IPv4-adressen.
   final InternetAddress? bindAddress;
+
+  /// Certificaat voor FTPS; zonder context is TLS niet beschikbaar.
+  final SecurityContext? securityContext;
+
+  bool get tlsAvailable =>
+      securityContext != null && config.tls != FtpTls.off;
+  bool get tlsRequired => tlsAvailable && config.tls == FtpTls.required;
 
   ServerSocket? _server;
   final _sessions = <_Session>{};
@@ -156,8 +186,23 @@ class _Session {
       : peer = '${socket.remoteAddress.address}:${socket.remotePort}';
 
   final FtpServer server;
-  final Socket socket;
+
+  /// Besturingsverbinding; wordt na AUTH TLS een [SecureSocket].
+  Socket socket;
   final String peer;
+
+  /// Na AUTH TLS: nieuwe regellezer voor de versleutelde verbinding.
+  StreamIterator<String>? _swapLines;
+
+  /// PROT P: gegevensverbindingen ook via TLS.
+  bool _tlsData = false;
+
+  bool get _tlsControl => socket is SecureSocket;
+
+  static StreamIterator<String> _lineReader(Socket s) => StreamIterator(s
+      .cast<List<int>>()
+      .transform(const Utf8Decoder(allowMalformed: true))
+      .transform(const LineSplitter()));
 
   FtpServerConfig get cfg => server.config;
   String get root => p.normalize(p.absolute(cfg.rootPath));
@@ -199,12 +244,16 @@ class _Session {
 
   Future<void> run() async {
     _reply(220, 'Bestandskluis FTP-server gereed');
-    final lines = StreamIterator(socket
-        .cast<List<int>>()
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .transform(const LineSplitter()));
+    var lines = _lineReader(socket);
     try {
-      while (!_closed && await lines.moveNext()) {
+      while (!_closed) {
+        final swap = _swapLines;
+        if (swap != null) {
+          // Overgestapt op TLS: de oude lezer krijgt niets meer binnen.
+          lines = swap;
+          _swapLines = null;
+        }
+        if (!await lines.moveNext()) break;
         final line = lines.current.trim();
         if (line.isEmpty) continue;
         final sp = line.indexOf(' ');
@@ -243,6 +292,11 @@ class _Session {
     if (!_loggedIn && !_noLogin.contains(cmd)) {
       throw _FtpError(530, 'Log eerst in');
     }
+    if (server.tlsRequired &&
+        !_tlsControl &&
+        (cmd == 'USER' || cmd == 'PASS')) {
+      throw _FtpError(530, 'Deze server vereist TLS (FTPS): gebruik AUTH TLS');
+    }
     if (cfg.readOnly && _writing.contains(cmd)) {
       throw _FtpError(550, 'Server is alleen-lezen');
     }
@@ -276,11 +330,30 @@ class _Session {
           'EPSV',
           'PASV',
           'REST STREAM',
+          if (server.tlsAvailable) ...['AUTH TLS', 'PBSZ', 'PROT'],
         ], 'Einde');
       case 'OPTS':
         _reply(200, 'OK');
       case 'AUTH':
-        _reply(502, 'TLS wordt niet ondersteund');
+        await _authTls(arg);
+      case 'PBSZ':
+        if (!_tlsControl) throw _FtpError(503, 'Gebruik eerst AUTH TLS');
+        _reply(200, 'PBSZ=0');
+      case 'PROT':
+        final level = arg.trim().toUpperCase();
+        if (level == 'P') {
+          if (!_tlsControl) throw _FtpError(503, 'Gebruik eerst AUTH TLS');
+          _tlsData = true;
+          _reply(200, 'Gegevens worden versleuteld');
+        } else if (level == 'C') {
+          if (server.tlsRequired) {
+            throw _FtpError(534, 'Deze server vereist versleutelde gegevens');
+          }
+          _tlsData = false;
+          _reply(200, 'Gegevens onversleuteld');
+        } else {
+          throw _FtpError(504, 'Alleen PROT C of P');
+        }
       case 'HELP':
         _reply(214, 'Zie RFC 959');
       case 'TYPE':
@@ -297,10 +370,13 @@ class _Session {
       case 'XCUP':
         await _cwdTo('..');
       case 'PASV':
+        _checkDataProtection();
         await _openPassive(extended: false);
       case 'EPSV':
+        _checkDataProtection();
         await _openPassive(extended: true);
       case 'PORT':
+        _checkDataProtection();
         _port(arg);
       case 'LIST':
       case 'NLST':
@@ -327,6 +403,7 @@ class _Session {
       case 'APPE':
         await _stor(arg, append: true);
       case 'DELE':
+        _real(_abs(arg), markerAllowed: false);
         final e = await _resolveOrFail(arg);
         if (e.isDir) throw _FtpError(550, 'Is een map');
         await File(e.real).delete();
@@ -345,6 +422,7 @@ class _Session {
         await Directory(e.real).delete();
         _reply(250, 'Map verwijderd');
       case 'RNFR':
+        _real(_abs(arg), markerAllowed: false);
         await _resolveOrFail(arg);
         _renameFrom = _abs(arg);
         _reply(350, 'Geef de nieuwe naam');
@@ -355,6 +433,27 @@ class _Session {
       default:
         _reply(502, 'Opdracht niet ondersteund');
     }
+  }
+
+  Future<void> _authTls(String arg) async {
+    final ctx = server.securityContext;
+    final kind = arg.trim().toUpperCase();
+    if (!server.tlsAvailable || ctx == null) {
+      throw _FtpError(502, 'TLS is uitgeschakeld');
+    }
+    if (kind != 'TLS' && kind != 'SSL' && kind != 'TLS-C') {
+      throw _FtpError(504, 'Gebruik AUTH TLS');
+    }
+    if (_tlsControl) throw _FtpError(503, 'Al versleuteld');
+    _reply(234, 'Start TLS');
+    await socket.flush();
+    final secure = await SecureSocket.secureServer(socket, ctx)
+        .timeout(const Duration(seconds: 20));
+    socket = secure;
+    _swapLines = _lineReader(secure);
+    // Na AUTH opnieuw inloggen (RFC 4217).
+    _loggedIn = false;
+    server._log('TLS gestart', peer);
   }
 
   Future<void> _login(String pass) async {
@@ -399,9 +498,20 @@ class _Session {
     return '/${parts.join('/')}';
   }
 
-  String _real(String virtualPath) {
+  /// Het kluisbestand mag alleen gelezen/geschreven worden door een
+  /// ingelogde gebruiker met schrijfrechten (nodig voor back-ups van
+  /// kluizen); verwijderen of hernoemen kan nooit.
+  bool get _mayTouchMarker {
+    final u = _user ?? '';
+    return !cfg.readOnly && u != 'anonymous' && u != 'ftp';
+  }
+
+  String _real(String virtualPath, {bool markerAllowed = true}) {
     final segs = virtualPath.split('/').where((s) => s.isNotEmpty).toList();
-    if (segs.any((s) => s == VaultManager.markerName || s.contains('\\'))) {
+    final m = segs.indexOf(VaultManager.markerName);
+    if (segs.any((s) => s.contains('\\')) ||
+        (m >= 0 &&
+            (m != segs.length - 1 || !markerAllowed || !_mayTouchMarker))) {
       throw _FtpError(550, 'Niet toegestaan');
     }
     final real = p.normalize(p.joinAll([root, ...segs]));
@@ -438,8 +548,16 @@ class _Session {
     }
     if (cfg.decryptVaults) {
       final key = _keyForDir(p.dirname(real));
-      final enc = File(VaultCrypto.encryptedName(real));
-      if (key != null && await enc.exists()) {
+      File? enc;
+      if (key != null) {
+        try {
+          enc = File(p.join(p.dirname(real),
+              VaultCrypto.encryptedName(p.basename(real), key)));
+        } on StateError {
+          enc = null;
+        }
+      }
+      if (key != null && enc != null && await enc.exists()) {
         final st = await enc.stat();
         return _Entry(
             name: name,
@@ -470,7 +588,7 @@ class _Session {
         final isDir = st.type == FileSystemEntityType.directory;
         if (!isDir && key != null && VaultCrypto.isEncryptedName(name)) {
           out.add(_Entry(
-              name: VaultCrypto.plainName(name),
+              name: VaultCrypto.plainName(name, key),
               real: e.path,
               isDir: false,
               size: VaultCrypto.plainLength(st.size),
@@ -560,6 +678,19 @@ class _Session {
   }
 
   Future<Socket> _openData() async {
+    final raw = await _openRawData();
+    final ctx = server.securityContext;
+    if (!_tlsData || ctx == null) return raw;
+    try {
+      return await SecureSocket.secureServer(raw, ctx)
+          .timeout(const Duration(seconds: 20));
+    } catch (_) {
+      raw.destroy();
+      throw _FtpError(425, 'TLS op de gegevensverbinding mislukt');
+    }
+  }
+
+  Future<Socket> _openRawData() async {
     final pending = _pendingData;
     _pendingData = null;
     if (pending != null) {
@@ -573,6 +704,12 @@ class _Session {
           timeout: const Duration(seconds: 15));
     }
     throw _FtpError(425, 'Gebruik eerst PASV of PORT');
+  }
+
+  void _checkDataProtection() {
+    if (server.tlsRequired && !_tlsData) {
+      throw _FtpError(521, 'Deze server vereist PROT P');
+    }
   }
 
   // --- Overdrachten ---------------------------------------------------------
@@ -650,7 +787,11 @@ class _Session {
     final vaultRoot = server.vaults.vaultRootFor(dir);
     final name = p.basename(real);
     SecretKey? key;
-    if (vaultRoot != null && !VaultCrypto.isEncryptedName(name)) {
+    // Versleutelde bestanden en het kluisbestand (back-ups) gaan ongewijzigd
+    // door; al het andere wordt in een kluis versleuteld.
+    if (vaultRoot != null &&
+        !VaultCrypto.isEncryptedName(name) &&
+        name != VaultManager.markerName) {
       key = server.vaults.keyFor(vaultRoot);
       if (key == null) {
         _pendingData = null;
@@ -662,7 +803,15 @@ class _Session {
       }
     }
 
-    final target = key != null ? VaultCrypto.encryptedName(real) : real;
+    final String target;
+    try {
+      target = key != null
+          ? p.join(dir, VaultCrypto.encryptedName(name, key))
+          : real;
+    } on StateError catch (e) {
+      _pendingData = null;
+      throw _FtpError(553, e.message);
+    }
     final part = File('$target.part');
     _reply(150, 'Klaar om te ontvangen');
     final data = await _openData();
@@ -701,14 +850,22 @@ class _Session {
     if (fromVp == null) throw _FtpError(503, 'Gebruik eerst RNFR');
     final from = await _resolveOrFail(fromVp);
     final toVp = _abs(arg);
-    final toReal = _real(toVp);
+    final toReal = _real(toVp, markerAllowed: false);
     final srcRoot = server.vaults.vaultRootFor(p.dirname(from.real));
     final dstRoot = server.vaults.vaultRootFor(p.dirname(toReal));
     if (srcRoot != dstRoot) {
       throw _FtpError(
           553, 'Verplaatsen in of uit een kluis kan niet via FTP; gebruik de app');
     }
-    final dest = from.decrypt ? VaultCrypto.encryptedName(toReal) : toReal;
+    final String dest;
+    try {
+      dest = from.decrypt
+          ? p.join(p.dirname(toReal),
+              VaultCrypto.encryptedName(p.basename(toReal), from.key))
+          : toReal;
+    } on StateError catch (e) {
+      throw _FtpError(553, e.message);
+    }
     if (await FileSystemEntity.type(dest) != FileSystemEntityType.notFound) {
       throw _FtpError(553, 'Doel bestaat al');
     }

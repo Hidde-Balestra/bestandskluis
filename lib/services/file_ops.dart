@@ -37,8 +37,9 @@ class FileOps {
   Future<void> _transferOne(FileSystemEntity item, String destDir,
       String? destRoot, bool move, void Function(String)? onItem) async {
     final name = p.basename(item.path);
-    onItem?.call(VaultCrypto.plainName(name));
     final srcRoot = vaults.vaultRootFor(item.parent.path);
+    onItem?.call(VaultCrypto.plainName(
+        name, srcRoot == null ? null : vaults.keyFor(srcRoot)));
 
     if (item is Directory) {
       final isVault = vaults.isVaultRoot(item.path);
@@ -76,7 +77,8 @@ class FileOps {
     final destKey = destRoot == null ? null : vaults.keyFor(destRoot);
 
     if (srcRoot == destRoot || (!encrypted && destRoot == null)) {
-      final target = VaultManager.uniqueFile(destDir, name);
+      final target = VaultManager.uniqueFile(destDir, name,
+          encryptWith: srcRoot == destRoot ? srcKey : null);
       if (!(move && await _tryRename(item, target.path))) {
         await item.copy(target.path);
         if (move) await item.delete();
@@ -132,8 +134,12 @@ class FileOps {
     }
     final name = p.basename(e.path);
     final inVault = vaults.vaultRootFor(e.parent.path) != null;
+    final key = vaults.keyForDir(e.parent.path);
+    if (VaultCrypto.hasEncryptedName(name) && key == null) {
+      throw StateError('Ontgrendel de kluis eerst');
+    }
     final real = (e is File && inVault && VaultCrypto.isEncryptedName(name))
-        ? VaultCrypto.encryptedName(newName)
+        ? VaultCrypto.encryptedName(newName, key)
         : newName;
     final target = p.join(e.parent.path, real);
     if (await FileSystemEntity.type(target) != FileSystemEntityType.notFound) {

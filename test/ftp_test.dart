@@ -121,9 +121,17 @@ void main() {
     await expectLater(
         client.download('/../../etc/passwd', File(p.join(tmp.path, 'x'))),
         throwsA(isA<FtpException>()));
+    // Het kluisbestand is niet zichtbaar en kan niet worden verwijderd of
+    // hernoemd (wel gelezen door een gebruiker met schrijfrechten, voor
+    // back-ups).
+    expect((await client.list('/Kluis')).map((e) => e.name),
+        isNot(contains('.bestandskluis')));
     await expectLater(
-        client.download('/Kluis/.bestandskluis', File(p.join(tmp.path, 'x'))),
+        client.delete('/Kluis/.bestandskluis'), throwsA(isA<FtpException>()));
+    await expectLater(client.rename('/Kluis/.bestandskluis', '/Kluis/x'),
         throwsA(isA<FtpException>()));
+    expect(File(p.join(root.path, 'Kluis', '.bestandskluis')).existsSync(),
+        isTrue);
     await client.cd('/../..');
     expect(await client.pwd(), '/');
   });
@@ -143,6 +151,10 @@ void main() {
     final c2 = await FtpClient.connect('127.0.0.1', port: s2.port);
     await expectLater(c2.delete('/hallo.txt'), throwsA(isA<FtpException>()));
     expect(File(p.join(root.path, 'hallo.txt')).existsSync(), isTrue);
+    // Anoniem: kluisbestand niet leesbaar.
+    await expectLater(
+        c2.download('/Kluis/.bestandskluis', File(p.join(tmp.path, 'x'))),
+        throwsA(isA<FtpException>()));
     await c2.quit();
     await s2.dispose();
   });

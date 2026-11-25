@@ -2,7 +2,7 @@
 
 # Bestandskluis
 
-Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP-server en versleutelde mappen combineert.
+Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP(S)-server en versleutelde mappen combineert.
 
 [![CI](https://github.com/Hidde-Balestra/bestandskluis/actions/workflows/ci.yml/badge.svg)](https://github.com/Hidde-Balestra/bestandskluis/actions/workflows/ci.yml)
 [![Release](https://github.com/Hidde-Balestra/bestandskluis/actions/workflows/release.yml/badge.svg)](https://github.com/Hidde-Balestra/bestandskluis/releases/latest)
@@ -13,56 +13,67 @@ Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP-serv
 
 ### Bestanden
 - Bladeren door interne opslag en SD-kaart, met snelkoppelingen (Downloads, Camera, …)
-- Lijst- en galerijweergave, verborgen bestanden tonen
+- Lijst- en galerijweergave; in kluizen ook **miniaturen van versleutelde foto's** (alleen in het werkgeheugen ontsleuteld, nooit op schijf)
+- **Zoeken** in de huidige map en alle submappen (ook op versleutelde namen in ontgrendelde kluizen)
+- **Sorteren** op naam, datum of grootte
 - Kopiëren, knippen/plakken, hernoemen, verwijderen, nieuwe map, delen
+- **Zip**: inpakken en uitpakken, ook in en uit kluizen (met bescherming tegen "zip slip")
 - Meerdere items selecteren (lang indrukken) of **alles selecteren** met de knop bovenin
+- **Delen naar Bestandskluis**: in elke app *Delen → Bestandskluis* en het bestand gaat versleuteld een kluis in
 
 ### Galerij
 - Alle foto's en video's van het toestel per album
 - Viewer met zoomen, vegen en een videospeler
 - Alles selecteren (hele album) om te delen of naar een kluis te verplaatsen
 - **Naar kluis verplaatsen**: selecteer foto's/video's, versleutel ze in een kluis en verwijder ze uit de galerij
+- **Nieuwe camerafoto's automatisch naar een kluis** (instelbaar): gebeurt zodra de app open is en die kluis ontgrendeld is
 - Tabblad **Kluizen**: foto's en video's uit ontgrendelde kluizen
 
 ### Versleutelde mappen (kluizen)
-- **Nieuwe kluis**: op het startscherm (knop *Nieuwe kluis*, komt in `Kluizen/` in de interne opslag) of in elke map via de **+**-knop. Je kiest een naam en een wachtwoord en de lege kluis wordt meteen geopend.
+- **Nieuwe kluis**: op het startscherm of in elke map via de **+**-knop
 - Bestaande map versleutelen: **Map versleutelen** in het menu van de map, of **+ → Deze map versleutelen**
-- **Mijn kluizen** op het startscherm: alle kluizen, ook vergrendelde; tikken = ontgrendelen en openen
-- Bestanden in de kluis (ook in submappen) worden opgeslagen als `naam.ext.bkv`
-- Ontgrendelen met een wachtwoord; de sleutel staat alleen in het werkgeheugen
-- Bestanden die je in een kluis plakt worden automatisch versleuteld; bestanden die je eruit haalt automatisch ontsleuteld
-- **Ontgrendelen met vingerafdruk** (in te schakelen bij *Instellingen*): na één keer ontgrendelen met het wachtwoord wordt de kluissleutel (niet het wachtwoord) bewaard in de door de Android Keystore beschermde opslag van de app, en alleen na een geslaagde vingerafdrukcontrole gebruikt. Per kluis aan/uit te zetten; uitschakelen wist alle bewaarde sleutels.
-- Automatisch vergrendelen na 1, 5 (standaard), 15 of 30 minuten op de achtergrond, of nooit (instelbaar; niet zolang de FTP-server draait)
-- **Delen = tijdelijk ontsleutelen**: bij delen wordt een ontsleutelde kopie in de cache van de app gemaakt. Die wordt na 10 minuten verwijderd, en in elk geval bij de volgende start van de app. De kluis zelf blijft versleuteld.
+- **Bestandsnamen versleutelen** (keuze bij het maken van de kluis): zonder wachtwoord is niet te zien hoe bestanden heten (`a8f3…kx2.bkx`). Mapnamen blijven leesbaar.
+- **Wachtwoord wijzigen** zonder alle bestanden opnieuw te versleutelen
+- **Herstelcode**: een code van 24 tekens om de kluis te openen als je het wachtwoord vergeet (daarna stel je een nieuw wachtwoord in)
+- **Mijn kluizen** op het startscherm: alle kluizen, ook vergrendelde
+- **Ontgrendelen met vingerafdruk**: de kluissleutel staat in een Android Keystore-sleutel die alleen na een vingerafdrukscan wordt vrijgegeven (Android 9+). Een nieuw toegevoegde vingerafdruk maakt die sleutel ongeldig; dan is één keer het wachtwoord nodig. Op Android 7/8 controleert de app de vingerafdruk.
+- **Schermbeveiliging**: zolang een kluis open is geen schermafbeeldingen en verborgen inhoud in "recente apps"
+- Automatisch vergrendelen na 1, 5 (standaard), 15 of 30 minuten op de achtergrond, of nooit
+- **Indringersfoto** (optioneel): na 3 verkeerde wachtwoorden maakt de voorcamera ongemerkt een foto, versleuteld bewaard. Bekijken kan alleen na vingerafdruk of schermvergrendeling.
+- **Delen = tijdelijk ontsleutelen**: bij delen wordt een ontsleutelde kopie in de cache van de app gemaakt. Die wordt na 10 minuten verwijderd, en in elk geval bij de volgende start van de app.
 
 ### FTP
-- **Eigen FTP-server** op je toestel: kies de gedeelde map, poort, gebruiker/wachtwoord (willekeurig gegenereerd), alleen-lezen of anoniem
-- **Kluizen via FTP**: bestanden in *ontgrendelde* kluizen worden tijdens het downloaden ontsleuteld (`foto.jpg.bkv` verschijnt als `foto.jpg`). Uploads naar een kluis worden direct versleuteld opgeslagen. Op de schijf wordt nooit iets ontsleuteld bewaard. Vergrendelde kluizen geven alleen de versleutelde `.bkv`-bestanden en weigeren uploads.
-- **FTP-client**: verbinden met andere servers, bladeren, downloaden, uploaden (ook vanuit een kluis, dan wordt het tijdelijk ontsleuteld), hernoemen en verwijderen
-- Ondersteunt passief (PASV/EPSV) en actief (PORT), MLSD/LIST, SIZE, MDTM, REST (hervatten, ook bij ontsleutelen)
-
-> FTP versleutelt het netwerkverkeer niet. Gebruik de server alleen op een vertrouwd netwerk.
+- **Eigen FTP-server** op je toestel: gedeelde map, poort, gebruiker/wachtwoord, alleen-lezen of anoniem
+- **FTPS** (expliciet, `AUTH TLS`): uit, optioneel (standaard) of verplicht. Het certificaat wordt op de telefoon gemaakt; de vingerafdruk staat in de app. Werkt met FileZilla, WinSCP, enz.
+- **Op de achtergrond**: de server blijft draaien met het scherm uit of in een andere app (melding met *Stoppen*)
+- **QR-code**: scan met een andere telefoon om meteen te verbinden. Met Bestandskluis op die telefoon wordt ook het certificaat gecontroleerd.
+- **Kluizen via FTP**: bestanden in *ontgrendelde* kluizen worden tijdens het downloaden ontsleuteld; uploads naar een kluis worden direct versleuteld. Vergrendelde kluizen geven alleen versleutelde bestanden.
+- **FTP-client** met FTPS: het servercertificaat wordt de eerste keer onthouden en daarna gecontroleerd (een gewijzigd certificaat wordt geweigerd)
+- **Back-up van kluizen naar je FTP-server**: handmatig of elke nacht automatisch (op wifi). Alleen de versleutelde bestanden gaan over de lijn, precies zoals ze op de telefoon staan. De kluis hoeft daarvoor niet open te zijn en de server ziet nooit iets onversleuteld. Alleen gewijzigde bestanden worden verstuurd.
 
 ## Beveiliging
 
 | Onderdeel | Keuze |
 |---|---|
-| Sleutel uit wachtwoord | PBKDF2-HMAC-SHA256, 210.000 iteraties, 16-byte salt per kluis |
+| Kluissleutel | Willekeurig (256 bit), ingepakt met AES-256-GCM door een sleutel uit het wachtwoord (en eventueel uit de herstelcode) |
+| Sleutel uit wachtwoord | PBKDF2-HMAC-SHA256, 210.000 iteraties, 16-byte salt |
 | Sleutel per bestand | HKDF-SHA256(kluissleutel, willekeurige salt van 16 bytes) |
 | Versleuteling | AES-256-GCM in blokken van 256 KiB (streaming, ook voor grote video's) |
 | Integriteit | GCM-tag per blok; de AAD bevat de header en een "laatste blok"-vlag, zodat wijzigen, omwisselen of afkappen wordt herkend |
-| Wachtwoordcontrole | AES-GCM-gecodeerde controlewaarde in `.bestandskluis` |
+| Bestandsnamen (optioneel) | AES-256-GCM met een eigen sleutel (HKDF), nonce = HMAC van de naam (deterministisch, zodat bestanden op naam te vinden zijn) |
+| Vingerafdruk | Android Keystore, sterke biometrie, ongeldig bij nieuwe vingerafdruk |
+| FTPS | TLS met zelfondertekend EC-certificaat (P-256), vastgepind door de client |
 
-Bestandsnamen en de mapstructuur blijven zichtbaar; alleen de inhoud is versleuteld. Zonder het wachtwoord is een kluis **niet** te herstellen.
+Kluizen van versie 1 (v1.0–v1.2) blijven werken en worden versie 2 zodra je het wachtwoord wijzigt. Zonder wachtwoord én zonder herstelcode is een kluis **niet** te herstellen.
 
-Bestandsformaat (`.bkv`, versie 1): `"BKV1"` · blokgrootte (u32) · salt (16 bytes), daarna blokken `AES-GCM(blok) || tag(16)` met nonce = bloknummer.
+Bestandsformaat (`.bkv`/`.bkx`): `"BKV1"` · blokgrootte (u32) · salt (16 bytes), daarna blokken `AES-GCM(blok) || tag(16)` met nonce = bloknummer.
 
 ## Ontwikkelen
 
 ```bash
 flutter pub get
 flutter analyze
-flutter test           # crypto, kluizen, FTP-server en -client
+flutter test           # crypto, kluizen, namen, herstelcode, FTP(S), back-up, zip
 flutter run
 ```
 
@@ -74,8 +85,8 @@ Releases worden gebouwd door GitHub Actions ([release.yml](.github/workflows/rel
 
 ```bash
 # versie in pubspec.yaml aanpassen, dan:
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.3.1
+git push origin v1.3.1
 ```
 
 De workflow test de code, bouwt de APK, tekent hem met de release-sleutel, controleert de handtekening met `apksigner` en publiceert een GitHub-release met de APK en `SHA256SUMS.txt`.

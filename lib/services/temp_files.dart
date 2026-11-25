@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../crypto/vault_crypto.dart';
+import 'thumbnails.dart';
 import '../crypto/vault_manager.dart';
 
 /// Tijdelijk ontsleutelde kopieën voor bekijken en delen.
@@ -41,7 +42,8 @@ class TempFiles {
     final dir = await _dir('bekijken');
     final sub = Directory(p.join(dir.path, '${cacheKey.hashCode.toUnsigned(32)}'));
     await sub.create(recursive: true);
-    final out = File(p.join(sub.path, VaultCrypto.plainName(p.basename(file.path))));
+    final out =
+        File(p.join(sub.path, VaultCrypto.plainName(p.basename(file.path), key)));
     await VaultCrypto.decryptFile(file, out, key);
     _viewCache[cacheKey] = out;
     return out;
@@ -64,7 +66,8 @@ class TempFiles {
                 '${DateTime.now().millisecondsSinceEpoch}'))
             .create(recursive: true);
         final target =
-            VaultManager.uniqueFile(shareDir.path, VaultCrypto.plainName(name));
+            VaultManager.uniqueFile(
+            shareDir.path, VaultCrypto.plainName(name, key));
         await VaultCrypto.decryptFile(f, target, key);
         out.add(XFile(target.path));
       } else {
@@ -88,6 +91,7 @@ class TempFiles {
   /// Verwijdert de ontsleutelde kopieën die alleen voor bekijken dienden
   /// (gedeelde kopieën lopen via hun eigen timer af).
   static Future<void> clearViewCache() async {
+    Thumbnails.clear();
     _viewCache.clear();
     try {
       final d = Directory(

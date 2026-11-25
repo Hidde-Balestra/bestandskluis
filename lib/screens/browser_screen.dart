@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path/path.dart' as p;
@@ -12,6 +13,8 @@ import '../services/temp_files.dart';
 import '../util/format.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/dialogs.dart';
+import '../widgets/encrypted_thumb.dart';
+import '../widgets/vault_dialogs.dart';
 import '../widgets/vault_unlock.dart';
 import 'media_viewer.dart';
 
@@ -21,7 +24,8 @@ class FsItem {
       required this.size,
       required this.modified,
       required this.encrypted,
-      required this.isVault});
+      required this.isVault,
+      this.key});
 
   final FileSystemEntity entity;
   final bool isDir;
@@ -34,8 +38,12 @@ class FsItem {
   /// Map die zelf een kluis is.
   final bool isVault;
 
+  /// Kluissleutel (nodig voor versleutelde bestandsnamen).
+  final SecretKey? key;
+
   String get realName => p.basename(entity.path);
-  String get name => encrypted ? VaultCrypto.plainName(realName) : realName;
+  late final String name =
+      encrypted ? VaultCrypto.plainName(realName, key) : realName;
   String get path => entity.path;
 }
 
@@ -95,6 +103,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   Future<void> _open(String? dir, {bool keepSelection = false}) async {
     if (!keepSelection) _selected.clear();
+    if (dir != _dir && _query != null) {
+      _searchGen++;
+      _searchCtl.clear();
+      _query = null;
+      _results = [];
+    }
     setState(() {
       _dir = dir;
       _loading = dir != null;
@@ -120,15 +134,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
               size: enc ? VaultCrypto.plainLength(st.size) : st.size,
               modified: st.modified,
               encrypted: enc,
-              isVault: isDir && vaults.isVaultRoot(e.path)));
+              isVault: isDir && vaults.isVaultRoot(e.path),
+              key: key));
         } on FileSystemException {
           continue;
         }
       }
-      items.sort((a, b) {
-        if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
-        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-      });
+      items.sort(_compare);
       if (!mounted || _dir != dir) return;
       setState(() {
         _items = items;
@@ -144,6 +156,21 @@ class _BrowserScreenState extends State<BrowserScreen> {
         _error = e.osError?.message ?? e.message;
       });
     }
+  }
+
+  /// Mappen eerst, daarna volgens de gekozen sortering.
+  int _compare(FsItem a, FsItem b) {
+    if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
+    final sort = services.settings.sort;
+    final desc = sort.startsWith('-');
+    final byName = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    final r = switch (sort.replaceFirst('-', '')) {
+      'datum' => a.modified.compareTo(b.modified),
+      'grootte' => a.isDir ? 0 : a.size.compareTo(b.size),
+      _ => byName,
+    };
+    final v = desc ? -r : r;
+    return v != 0 ? v : byName;
   }
 
   void _up() {
@@ -166,21 +193,35 @@ class _BrowserScreenState extends State<BrowserScreen> {
         title: 'Map versleutelen',
         message:
             'Alle bestanden in "${p.basename(path)}" (ook in submappen) worden met AES-256 '
-            'versleuteld. Zonder het wachtwoord zijn ze niet meer te openen — '
-            'er is geen herstelmogelijkheid.',
+            'versleuteld. Zonder het wachtwoord (of een herstelcode) zijn ze '
+            'niet meer te openen.',
         confirm: 'Doorgaan');
     if (!ok || !mounted) return;
+    final names = await askEncryptNames(context);
+    if (names == null || !mounted) return;
     final pw = await askPassword(context,
         title: 'Wachtwoord voor de kluis', repeat: true);
     if (pw == null || !mounted) return;
-    await runWithProgress(context, 'Versleutelen…', (update) async {
+    final done = await runWithProgress(context, 'Versleutelen…', (update) async {
       update('Sleutel afleiden…');
       await vaults.create(path, pw,
-          onProgress: (d, t, n) => update('$d / $t\n$n'));
+          encryptNames: names, onProgress: (d, t, n) => update('$d / $t\n$n'));
       await services.known.add(path);
       await rememberForBiometric(path);
+      return true;
     });
     _reload();
+    if (done == true && mounted) await _offerRecoveryCode(path);
+  }
+
+  Future<void> _offerRecoveryCode(String root) async {
+    final ok = await confirmDialog(context,
+        title: 'Herstelcode maken?',
+        message: 'Met een herstelcode kun je de kluis openen als je het '
+            'wachtwoord vergeet. Schrijf hem op en bewaar hem niet op deze '
+            'telefoon. Je kunt dit ook later doen via het menu van de kluis.',
+        confirm: 'Code maken');
+    if (ok && mounted) await createAndShowRecoveryCode(context, root);
   }
 
   /// Standaardlocatie voor nieuwe kluizen vanaf het startscherm.
@@ -209,17 +250,19 @@ class _BrowserScreenState extends State<BrowserScreen> {
       showMessage(context, 'Er bestaat al een map "$name"');
       return;
     }
+    final names = await askEncryptNames(context);
+    if (names == null || !mounted) return;
     final pw = await askPassword(context,
         title: 'Wachtwoord voor "$name"',
         repeat: true,
-        message: 'Zonder dit wachtwoord zijn de bestanden niet meer te '
-            'openen. Er is geen herstelmogelijkheid.');
+        message: 'Zonder dit wachtwoord (of een herstelcode) zijn de '
+            'bestanden niet meer te openen.');
     if (pw == null || !mounted) return;
     final ok = await runWithProgress(context, 'Kluis maken…', (update) async {
       update('Sleutel afleiden…');
       await dir.create(recursive: true);
       try {
-        await vaults.create(dir.path, pw);
+        await vaults.create(dir.path, pw, encryptNames: names);
       } catch (_) {
         await dir.delete(recursive: true);
         rethrow;
@@ -230,6 +273,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
     });
     if (ok == true && mounted) {
       await _open(dir.path);
+      if (!mounted) return;
+      await _offerRecoveryCode(dir.path);
       if (mounted) {
         showMessage(context,
             'Kluis "$name" gemaakt. Bestanden die je hier plakt worden versleuteld.');
@@ -331,6 +376,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
       return;
     }
     final file = item.entity as File;
+    if (item.name.toLowerCase().endsWith('.zip')) {
+      final ok = await confirmDialog(context,
+          title: item.name,
+          message: 'Uitpakken in een nieuwe map "${p.basenameWithoutExtension(item.name)}"?',
+          confirm: 'Uitpakken');
+      if (ok) await _unzip(item);
+      return;
+    }
     if (isMedia(item.name)) {
       final media = _items.where((i) => !i.isDir && isMedia(i.name)).toList();
       await Navigator.push(
@@ -498,7 +551,36 @@ class _BrowserScreenState extends State<BrowserScreen> {
         await _removeVault(item.path);
       case 'details':
         _details(item);
+      case 'zip':
+        await _zip([item]);
+      case 'unzip':
+        await _unzip(item);
     }
+  }
+
+  Future<void> _zip(List<FsItem> items) async {
+    final dir = _dir;
+    if (dir == null || items.isEmpty) return;
+    final base = items.length == 1
+        ? p.basenameWithoutExtension(items.first.name)
+        : p.basename(dir);
+    final name = await askText(context,
+        title: 'Inpakken (zip)', initial: '$base.zip', confirm: 'Inpakken');
+    if (name == null || name.isEmpty || !mounted) return;
+    final zipName = name.toLowerCase().endsWith('.zip') ? name : '$name.zip';
+    await runWithProgress(context, 'Inpakken…', (update) async {
+      await services.zips.zip(items.map((i) => i.entity).toList(), dir, zipName,
+          onItem: update);
+    });
+    setState(_selected.clear);
+    _reload();
+  }
+
+  Future<void> _unzip(FsItem item) async {
+    await runWithProgress(context, 'Uitpakken…', (update) async {
+      await services.zips.unzip(item.entity as File, onItem: update);
+    });
+    _reload();
   }
 
   // --- Opbouw ---------------------------------------------------------------
@@ -511,6 +593,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
         if (didPop) return;
         if (_selecting) {
           setState(_selected.clear);
+        } else if (_query != null) {
+          _closeSearch();
         } else {
           _up();
         }
@@ -585,11 +669,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 _toClipboard(items, move: true);
               case 'rename':
                 _rename(items.single);
+              case 'zip':
+                _zip(items);
             }
           },
           itemBuilder: (_) => [
             const PopupMenuItem(value: 'copy', child: Text('Kopiëren')),
             const PopupMenuItem(value: 'move', child: Text('Knippen')),
+            if (!items.any((i) => i.isVault))
+              const PopupMenuItem(value: 'zip', child: Text('Inpakken (zip)')),
             if (items.length == 1)
               const PopupMenuItem(value: 'rename', child: Text('Hernoemen')),
           ],
@@ -598,9 +686,66 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 
+  PreferredSizeWidget _searchBar() => AppBar(
+        leading: IconButton(
+            tooltip: 'Zoeken sluiten',
+            icon: const Icon(Icons.arrow_back),
+            onPressed: _closeSearch),
+        title: TextField(
+          controller: _searchCtl,
+          autofocus: true,
+          decoration: InputDecoration(
+              hintText: 'Zoeken in ${_rootLabel(_dir!)} en submappen',
+              border: InputBorder.none),
+          onChanged: _search,
+        ),
+        actions: [
+          if (_searchCtl.text.isNotEmpty)
+            IconButton(
+                tooltip: 'Wissen',
+                icon: const Icon(Icons.clear),
+                onPressed: () {
+                  _searchCtl.clear();
+                  _search('');
+                }),
+        ],
+      );
+
+  Future<void> _chooseSort() async {
+    const options = [
+      ('naam', 'Naam (A–Z)'),
+      ('-naam', 'Naam (Z–A)'),
+      ('-datum', 'Nieuwste eerst'),
+      ('datum', 'Oudste eerst'),
+      ('-grootte', 'Grootste eerst'),
+      ('grootte', 'Kleinste eerst'),
+    ];
+    final v = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Sorteren'),
+        children: [
+          RadioGroup<String>(
+            groupValue: services.settings.sort,
+            onChanged: (v) => Navigator.pop(ctx, v),
+            child: Column(children: [
+              for (final (k, label) in options)
+                RadioListTile<String>(value: k, title: Text(label)),
+            ]),
+          ),
+        ],
+      ),
+    );
+    if (v != null) {
+      await services.settings.setSort(v);
+      _reload();
+    }
+  }
+
   PreferredSizeWidget _normalBar() {
     final dir = _dir;
     final root = _vaultRoot;
+    if (_query != null && dir != null) return _searchBar();
     return AppBar(
       leading: dir == null
           ? null
@@ -630,6 +775,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
         ],
       ),
       actions: [
+        if (dir != null && !_vaultLocked)
+          IconButton(
+              tooltip: 'Zoeken',
+              icon: const Icon(Icons.search),
+              onPressed: () => setState(() {
+                    _query = '';
+                    _results = [];
+                  })),
         if (dir != null &&
             !_vaultLocked &&
             !widget.pickFileMode &&
@@ -639,11 +792,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
               icon: const Icon(Icons.select_all),
               onPressed: () =>
                   setState(() => _selected.addAll(_items.map((i) => i.path)))),
-        if (dir != null && !_vaultLocked)
-          IconButton(
-              tooltip: _grid ? 'Lijst' : 'Galerijweergave',
-              icon: Icon(_grid ? Icons.view_list : Icons.grid_view),
-              onPressed: () => setState(() => _grid = !_grid)),
         if (dir != null)
           PopupMenuButton<String>(
             onSelected: (a) async {
@@ -654,6 +802,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   await _newVault();
                 case 'encryptHere':
                   await _createVault(dir);
+                case 'view':
+                  setState(() => _grid = !_grid);
+                case 'sort':
+                  await _chooseSort();
                 case 'hidden':
                   setState(() => _showHidden = !_showHidden);
                   _reload();
@@ -662,6 +814,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   await TempFiles.clearViewCache();
                 case 'unlock':
                   await _unlock(root!);
+                case 'password':
+                  await changeVaultPassword(context, root!);
+                case 'recovery':
+                  await createAndShowRecoveryCode(context, root!);
+                case 'recover':
+                  if (await recoverVault(context, root!)) _reload();
                 case 'remove':
                   await _removeVault(root!);
                 case 'refresh':
@@ -678,24 +836,185 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       value: 'encryptHere',
                       child: Text('Deze map versleutelen')),
               ],
+              if (!_vaultLocked) ...[
+                PopupMenuItem(
+                    value: 'view',
+                    child: Text(_grid ? 'Lijstweergave' : 'Galerijweergave')),
+                const PopupMenuItem(value: 'sort', child: Text('Sorteren…')),
+              ],
               CheckedPopupMenuItem(
                   value: 'hidden',
                   checked: _showHidden,
                   child: const Text('Verborgen bestanden')),
               const PopupMenuItem(value: 'refresh', child: Text('Vernieuwen')),
               if (root != null && !_vaultLocked) ...[
+                const PopupMenuDivider(),
                 const PopupMenuItem(
                     value: 'lock', child: Text('Kluis vergrendelen')),
                 const PopupMenuItem(
+                    value: 'password', child: Text('Wachtwoord wijzigen')),
+                const PopupMenuItem(
+                    value: 'recovery', child: Text('Herstelcode maken')),
+                const PopupMenuItem(
                     value: 'remove', child: Text('Versleuteling opheffen')),
               ],
-              if (root != null && _vaultLocked)
+              if (root != null && _vaultLocked) ...[
                 const PopupMenuItem(
                     value: 'unlock', child: Text('Kluis ontgrendelen')),
+                const PopupMenuItem(
+                    value: 'recover', child: Text('Herstelcode gebruiken')),
+              ],
             ],
           ),
       ],
     );
+  }
+
+  // --- Zoeken ---------------------------------------------------------------
+
+  final _searchCtl = TextEditingController();
+
+  /// null = niet zoeken.
+  String? _query;
+  List<FsItem> _results = [];
+  bool _searchBusy = false;
+  int _searchGen = 0;
+
+  void _closeSearch() {
+    _searchGen++;
+    _searchCtl.clear();
+    setState(() {
+      _query = null;
+      _results = [];
+      _searchBusy = false;
+    });
+  }
+
+  /// Zoekt (hoofdletterongevoelig) in de huidige map en alle submappen.
+  /// Versleutelde namen worden met de sleutel van hun kluis gelezen;
+  /// vergrendelde kluizen worden overgeslagen.
+  Future<void> _search(String q) async {
+    final gen = ++_searchGen;
+    final dir = _dir;
+    q = q.trim().toLowerCase();
+    setState(() {
+      _query = q;
+      _results = [];
+      _searchBusy = q.isNotEmpty;
+    });
+    if (q.isEmpty || dir == null) return;
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    if (gen != _searchGen) return;
+    final out = <FsItem>[];
+    final queue = <String>[dir];
+    var seen = 0;
+    while (queue.isNotEmpty && out.length < 300 && gen == _searchGen) {
+      final d = queue.removeAt(0);
+      final root = vaults.vaultRootFor(d);
+      if (root != null && !vaults.isUnlocked(root)) continue;
+      final key = root == null ? null : vaults.keyFor(root);
+      try {
+        await for (final e in Directory(d).list(followLinks: false)) {
+          final name = p.basename(e.path);
+          if (name == VaultManager.markerName || name.endsWith('.part')) continue;
+          if (!_showHidden && name.startsWith('.')) continue;
+          final isDir = e is Directory;
+          if (isDir) queue.add(e.path);
+          final enc = !isDir && root != null && VaultCrypto.isEncryptedName(name);
+          final shown = enc ? VaultCrypto.plainName(name, key) : name;
+          if (shown.toLowerCase().contains(q)) {
+            final st = await e.stat();
+            out.add(FsItem(e,
+                isDir: isDir,
+                size: enc ? VaultCrypto.plainLength(st.size) : st.size,
+                modified: st.modified,
+                encrypted: enc,
+                isVault: isDir && vaults.isVaultRoot(e.path),
+                key: key));
+          }
+          // Af en toe tussenresultaten tonen.
+          if (++seen % 500 == 0 && gen == _searchGen && mounted) {
+            setState(() => _results = List.of(out));
+          }
+        }
+      } on FileSystemException {
+        continue;
+      }
+    }
+    if (gen != _searchGen || !mounted) return;
+    setState(() {
+      _results = out;
+      _searchBusy = false;
+    });
+  }
+
+  Widget _searchResults() {
+    final q = _query ?? '';
+    if (q.isEmpty) {
+      return const _Message(
+          icon: Icons.search, text: 'Typ een (deel van een) naam');
+    }
+    if (_results.isEmpty) {
+      return _searchBusy
+          ? const Center(child: CircularProgressIndicator())
+          : const _Message(icon: Icons.search_off, text: 'Niets gevonden');
+    }
+    return Column(children: [
+      if (_searchBusy) const LinearProgressIndicator(),
+      Expanded(
+        child: ListView.builder(
+          itemCount: _results.length,
+          itemBuilder: (context, n) {
+            final i = _results[n];
+            return ListTile(
+              leading: SizedBox(
+                  width: 40, height: 40, child: Center(child: _leading(i))),
+              title: Text(i.name, overflow: TextOverflow.ellipsis),
+              subtitle: Text(
+                  p.relative(i.entity.parent.path, from: _dir!) == '.'
+                      ? (i.isDir ? 'map' : formatSize(i.size))
+                      : '${p.relative(i.entity.parent.path, from: _dir!)}'
+                          '${i.isDir ? '' : ' · ${formatSize(i.size)}'}',
+                  overflow: TextOverflow.ellipsis),
+              onTap: () async {
+                if (i.isDir) {
+                  _closeSearch();
+                  await _tap(i);
+                } else {
+                  await _openFound(i);
+                }
+              },
+            );
+          },
+        ),
+      ),
+    ]);
+  }
+
+  /// Opent een zoekresultaat (in een andere map dan de huidige).
+  Future<void> _openFound(FsItem item) async {
+    final file = item.entity as File;
+    if (widget.pickFileMode) {
+      Navigator.pop(context, item.path);
+      return;
+    }
+    if (isMedia(item.name)) {
+      await Navigator.push(
+          context,
+          MaterialPageRoute(
+              builder: (_) =>
+                  MediaViewer(items: [_mediaItem(item)], initialIndex: 0)));
+      return;
+    }
+    final plain = await runWithProgress(
+        context,
+        item.encrypted ? 'Ontsleutelen…' : 'Openen…',
+        (_) => TempFiles.plainFor(file, services.ops.keyForFile(file)));
+    if (plain == null) return;
+    final r = await OpenFilex.open(plain.path);
+    if (r.type != ResultType.done && mounted) {
+      showMessage(context, 'Geen app gevonden om dit bestand te openen');
+    }
   }
 
   String _rootLabel(String dir) {
@@ -724,12 +1043,20 @@ class _BrowserScreenState extends State<BrowserScreen> {
       return _Message(
         icon: Icons.lock,
         text: 'Deze kluis is vergrendeld.',
-        action: FilledButton.icon(
-            onPressed: () => _unlock(_vaultRoot!),
-            icon: const Icon(Icons.lock_open),
-            label: const Text('Ontgrendelen')),
+        action: Column(mainAxisSize: MainAxisSize.min, children: [
+          FilledButton.icon(
+              onPressed: () => _unlock(_vaultRoot!),
+              icon: const Icon(Icons.lock_open),
+              label: const Text('Ontgrendelen')),
+          TextButton(
+              onPressed: () async {
+                if (await recoverVault(context, _vaultRoot!)) _reload();
+              },
+              child: const Text('Wachtwoord vergeten? Herstelcode gebruiken')),
+        ]),
       );
     }
+    if (_query != null) return _searchResults();
     final list = _items.isEmpty
         ? const _Message(icon: Icons.folder_open, text: 'Deze map is leeg')
         : RefreshIndicator(
@@ -869,8 +1196,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
             errorBuilder: (_, _, _) => Icon(iconFor(kind), size: size * 0.8)),
       );
     }
-    if (kind == FileKind.image && i.encrypted && _grid) {
-      return _EncryptedThumb(file: i.entity as File, size: size);
+    if (kind == FileKind.image && i.encrypted) {
+      return EncryptedThumb(file: i.entity as File, size: size);
     }
     return Stack(clipBehavior: Clip.none, children: [
       Icon(iconFor(kind), size: size * 0.8),
@@ -894,6 +1221,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
         const PopupMenuItem(value: 'rename', child: Text('Hernoemen')),
         const PopupMenuItem(value: 'copy', child: Text('Kopiëren')),
         const PopupMenuItem(value: 'move', child: Text('Knippen')),
+        if (!i.isVault)
+          const PopupMenuItem(value: 'zip', child: Text('Inpakken (zip)')),
+        if (!i.isDir && i.name.toLowerCase().endsWith('.zip'))
+          const PopupMenuItem(value: 'unzip', child: Text('Uitpakken')),
         if (i.isDir && !i.isVault && !inVault)
           const PopupMenuItem(value: 'encrypt', child: Text('Map versleutelen')),
         if (i.isVault && vaults.isUnlocked(i.path))
@@ -975,32 +1306,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
 }
 
 /// Miniatuur van een versleutelde foto (tijdelijk ontsleuteld in de cache).
-class _EncryptedThumb extends StatefulWidget {
-  const _EncryptedThumb({required this.file, required this.size});
-  final File file;
-  final double size;
-  @override
-  State<_EncryptedThumb> createState() => _EncryptedThumbState();
-}
-
-class _EncryptedThumbState extends State<_EncryptedThumb> {
-  late final Future<File> _plain =
-      TempFiles.plainFor(widget.file, services.ops.keyForFile(widget.file));
-
-  @override
-  Widget build(BuildContext context) => FutureBuilder<File>(
-        future: _plain,
-        builder: (_, s) => s.hasData
-            ? Image.file(s.data!,
-                width: widget.size,
-                height: widget.size,
-                fit: BoxFit.cover,
-                cacheWidth: (widget.size * 2).round(),
-                errorBuilder: (_, _, _) => const Icon(Icons.broken_image))
-            : const Icon(Icons.lock, size: 32),
-      );
-}
-
 class _Message extends StatelessWidget {
   const _Message({required this.icon, required this.text, this.action});
   final IconData icon;

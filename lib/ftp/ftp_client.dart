@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'ftp_format.dart';
+import 'ftp_tls.dart';
 
 class FtpReply {
   FtpReply(this.code, this.lines);
@@ -24,42 +25,110 @@ class FtpException implements Exception {
       reply == null ? message : '$message (${reply!.code} ${reply!.message})';
 }
 
-/// Passieve FTP-client (zonder TLS) voor het bladeren, downloaden en uploaden.
+/// Het certificaat van de server is anders dan het onthouden certificaat.
+class FtpCertificateException extends FtpException {
+  FtpCertificateException(this.expected, this.actual)
+      : super('Het certificaat van de server is gewijzigd. Dit kan betekenen '
+            'dat iemand meeluistert. Verwacht $expected, ontvangen $actual.');
+  final String expected;
+  final String actual;
+}
+
+/// Passieve FTP-client voor het bladeren, downloaden en uploaden, met
+/// optioneel expliciete FTPS (AUTH TLS).
 class FtpClient {
   FtpClient._(this.host, this._socket, this._lines);
 
   final String host;
-  final Socket _socket;
-  final StreamIterator<String> _lines;
+  Socket _socket;
+  StreamIterator<String> _lines;
   Future<void> _queue = Future.value();
   bool _mlsd = true;
 
+  /// Versleutelde verbinding (FTPS).
+  bool get secure => _socket is SecureSocket;
+
+  /// SHA-256-vingerafdruk van het servercertificaat (alleen bij FTPS).
+  String? fingerprint;
+
+  static StreamIterator<String> _reader(Socket s) => StreamIterator(s
+      .cast<List<int>>()
+      .transform(const Utf8Decoder(allowMalformed: true))
+      .transform(const LineSplitter()));
+
+  /// Verbindt en logt in. Met [tls] wordt eerst AUTH TLS gedaan; als
+  /// [pinnedFingerprint] is gegeven moet het certificaat daarmee
+  /// overeenkomen (anders [FtpCertificateException]). Zonder vingerafdruk
+  /// wordt het certificaat geaccepteerd en staat de vingerafdruk daarna in
+  /// [fingerprint] (eerste keer vertrouwen).
   static Future<FtpClient> connect(
     String host, {
     int port = 21,
     String user = 'anonymous',
     String password = '',
+    bool tls = false,
+    String? pinnedFingerprint,
     Duration timeout = const Duration(seconds: 15),
   }) async {
     final socket = await Socket.connect(host, port, timeout: timeout);
-    final lines = StreamIterator(socket
-        .cast<List<int>>()
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .transform(const LineSplitter()));
-    final c = FtpClient._(host, socket, lines);
+    final c = FtpClient._(host, socket, _reader(socket));
     try {
       final greet = await c._read().timeout(timeout);
       if (greet.code != 220) throw FtpException('Onverwachte begroeting', greet);
+      if (tls) {
+        final a = await c._send('AUTH TLS');
+        if (a.code != 234) {
+          throw FtpException('Deze server ondersteunt geen FTPS', a);
+        }
+        final s = await SecureSocket.secure(c._socket,
+                host: host, onBadCertificate: (_) => true)
+            .timeout(timeout);
+        final fp = FtpTlsIdentity.fingerprintOfDer(s.peerCertificate!.der);
+        if (pinnedFingerprint != null && fp != pinnedFingerprint) {
+          s.destroy();
+          throw FtpCertificateException(pinnedFingerprint, fp);
+        }
+        c
+          .._socket = s
+          .._lines = _reader(s)
+          ..fingerprint = fp;
+      }
       var r = await c._send('USER $user');
       if (r.code == 331) r = await c._send('PASS $password');
       if (r.code != 230) throw FtpException('Inloggen mislukt', r);
+      if (tls) {
+        await c._send('PBSZ 0');
+        final p = await c._send('PROT P');
+        if (p.code != 200) {
+          throw FtpException('Versleutelde gegevensverbinding geweigerd', p);
+        }
+      }
       await c._send('OPTS UTF8 ON');
       await c._send('TYPE I');
     } catch (_) {
-      socket.destroy();
+      c._socket.destroy();
       rethrow;
     }
     return c;
+  }
+
+  /// Na het 150-antwoord: TLS op de gegevensverbinding starten.
+  Future<Socket> _protect(Socket raw) async {
+    if (!secure) return raw;
+    try {
+      final s = await SecureSocket.secure(raw,
+              host: host, onBadCertificate: (_) => true)
+          .timeout(const Duration(seconds: 15));
+      final fp = FtpTlsIdentity.fingerprintOfDer(s.peerCertificate!.der);
+      if (fp != fingerprint) {
+        s.destroy();
+        throw FtpCertificateException(fingerprint ?? '?', fp);
+      }
+      return s;
+    } catch (_) {
+      raw.destroy();
+      rethrow;
+    }
   }
 
   Future<FtpReply> _read() async {
@@ -150,13 +219,14 @@ class FtpClient {
   /// Inhoud van [path] (of de huidige map).
   Future<List<RemoteEntry>> list([String path = '']) => _locked(() async {
         Future<String?> fetch(String cmd) async {
-          final data = await _dataSocket();
+          final raw = await _dataSocket();
           final r = await _send(path.isEmpty ? cmd : '$cmd $path');
           if (r.code != 150 && r.code != 125) {
-            data.destroy();
+            raw.destroy();
             if (r.code == 500 || r.code == 502) return null;
             throw FtpException('Map lezen mislukt', r);
           }
+          final data = await _protect(raw);
           final bytes = await data.fold<List<int>>([], (a, b) => a..addAll(b));
           data.destroy();
           final done = await _read();
@@ -187,12 +257,13 @@ class FtpClient {
   Future<void> download(String remote, File local,
           {void Function(int bytes)? onProgress}) =>
       _locked(() async {
-        final data = await _dataSocket();
+        final raw = await _dataSocket();
         final r = await _send('RETR $remote');
         if (r.code != 150 && r.code != 125) {
-          data.destroy();
+          raw.destroy();
           throw FtpException('Downloaden mislukt', r);
         }
+        final data = await _protect(raw);
         final part = File('${local.path}.part');
         final sink = part.openWrite();
         var done = 0;
@@ -222,12 +293,13 @@ class FtpClient {
   Future<void> upload(File local, String remote,
           {void Function(int bytes)? onProgress}) =>
       _locked(() async {
-        final data = await _dataSocket();
+        final raw = await _dataSocket();
         final r = await _send('STOR $remote');
         if (r.code != 150 && r.code != 125) {
-          data.destroy();
+          raw.destroy();
           throw FtpException('Uploaden mislukt', r);
         }
+        final data = await _protect(raw);
         var done = 0;
         try {
           await data.addStream(local.openRead().map((d) {

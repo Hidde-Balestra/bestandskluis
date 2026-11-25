@@ -5,6 +5,8 @@ import 'package:path/path.dart' as p;
 
 import '../app_services.dart';
 import '../ftp/ftp_client.dart';
+import '../ftp/ftp_server.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import '../services/ftp_controller.dart';
 import '../services/storage.dart';
 import '../widgets/dialogs.dart';
@@ -108,6 +110,74 @@ class _ServerTabState extends State<_ServerTab> {
     }
   }
 
+  Future<void> _chooseTls() async {
+    final v = await showDialog<FtpTls>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Versleuteling (FTPS)'),
+        children: [
+          RadioGroup<FtpTls>(
+            groupValue: ftp.config.tls,
+            onChanged: (v) => Navigator.pop(ctx, v),
+            child: const Column(children: [
+              RadioListTile(value: FtpTls.off, title: Text('Uit')),
+              RadioListTile(
+                  value: FtpTls.optional,
+                  title: Text('Als de client erom vraagt')),
+              RadioListTile(value: FtpTls.required, title: Text('Verplicht')),
+            ]),
+          ),
+        ],
+      ),
+    );
+    if (v != null) await ftp.save(ftp.config.copyWith(tls: v));
+  }
+
+  Future<void> _showQr(String address) async {
+    var withPassword = true;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) {
+          final link = ftp.link(address, withPassword: withPassword);
+          return AlertDialog(
+            title: const Text('Verbinden via QR-code'),
+            content: SizedBox(
+              width: 280,
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Container(
+                  color: Colors.white,
+                  padding: const EdgeInsets.all(8),
+                  child: QrImageView(data: link, size: 240),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                    'Scan met de camera van een andere telefoon. Met Bestandskluis '
+                    'daarop wordt meteen verbonden${ftp.identity != null && ftp.config.tls != FtpTls.off ? ' en het certificaat gecontroleerd' : ''}.',
+                    style: const TextStyle(fontSize: 12)),
+                if (!ftp.config.allowAnonymous)
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Wachtwoord in de code'),
+                    subtitle: const Text(
+                        'Iedereen die de code ziet kan dan inloggen',
+                        style: TextStyle(fontSize: 12)),
+                    value: withPassword,
+                    onChanged: (v) => setState(() => withPassword = v),
+                  ),
+              ]),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Sluiten')),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -154,14 +224,23 @@ class _ServerTabState extends State<_ServerTab> {
                     if (_addresses.isEmpty)
                       const Text('Geen netwerkadres gevonden. Verbind met wifi.'),
                     for (final a in _addresses)
-                      _CopyRow(text: 'ftp://$a:${c.port}'),
+                      _CopyRow(text: ftp.link(a), onQr: () => _showQr(a)),
                     const SizedBox(height: 4),
                     Text(c.allowAnonymous
                         ? 'Anoniem inloggen toegestaan'
                         : 'Gebruiker: ${c.username}'),
+                    if (ftp.identity != null && c.tls != FtpTls.off)
+                      Text(
+                          c.tls == FtpTls.required
+                              ? 'Alleen versleuteld (FTPS)'
+                              : 'Versleuteld (FTPS) als de client dat ondersteunt',
+                          style: const TextStyle(fontWeight: FontWeight.w600)),
                     if (c.decryptVaults)
                       const Text(
                           'Ontgrendelde kluizen worden tijdens de overdracht ontsleuteld.'),
+                    if (ftp.background)
+                      const Text(
+                          'Blijft draaien op de achtergrond en met het scherm uit.'),
                   ],
                 ],
               ),
@@ -237,19 +316,50 @@ class _ServerTabState extends State<_ServerTab> {
             value: c.allowAnonymous,
             onChanged: (v) => ftp.save(c.copyWith(allowAnonymous: v)),
           ),
+          ListTile(
+            leading: const Icon(Icons.https_outlined),
+            title: const Text('Versleuteling (FTPS)'),
+            subtitle: Text(switch (c.tls) {
+              FtpTls.off => 'Uit — alles gaat onversleuteld over het netwerk',
+              FtpTls.optional =>
+                'Als de client erom vraagt (aanbevolen; werkt met FileZilla, WinSCP, …)',
+              FtpTls.required => 'Verplicht — clients zonder FTPS kunnen niet verbinden',
+            }),
+            onTap: _chooseTls,
+          ),
+          if (ftp.identity != null && c.tls != FtpTls.off)
+            ListTile(
+              leading: const Icon(Icons.fingerprint),
+              title: const Text('Certificaat (SHA-256)'),
+              subtitle: SelectableText(ftp.identity!.fingerprint,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+            ),
+          SwitchListTile(
+            secondary: const Icon(Icons.notifications_active_outlined),
+            title: const Text('Op de achtergrond doorlopen'),
+            subtitle: const Text(
+                'De server blijft actief met het scherm uit of in een andere app '
+                '(met een melding). Veeg je de app weg, dan stopt hij.'),
+            value: ftp.background,
+            onChanged: (v) => ftp.save(c, inBackground: v),
+          ),
           SwitchListTile(
             secondary: const Icon(Icons.light_mode_outlined),
             title: const Text('Scherm aan houden'),
-            subtitle: const Text('Voorkomt dat Android de server onderbreekt'),
+            subtitle: const Text('Alleen nodig als de server op de achtergrond '
+                'toch wordt onderbroken'),
             value: ftp.keepScreenOn,
             onChanged: (v) => ftp.save(c, wakelock: v),
           ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
             child: Text(
-                'Let op: FTP is niet versleuteld op het netwerk. Gebruik de '
-                'server alleen op een vertrouwd (thuis)netwerk.',
-                style: TextStyle(fontSize: 12)),
+                c.tls == FtpTls.required
+                    ? 'Alle verbindingen zijn versleuteld.'
+                    : 'Let op: zonder FTPS gaat alles (ook het wachtwoord) '
+                        'onversleuteld over het netwerk. Gebruik dan alleen een '
+                        'vertrouwd (thuis)netwerk.',
+                style: const TextStyle(fontSize: 12)),
           ),
           if (ftp.log.isNotEmpty) ...[
             const Divider(height: 32),
@@ -270,13 +380,20 @@ class _ServerTabState extends State<_ServerTab> {
 }
 
 class _CopyRow extends StatelessWidget {
-  const _CopyRow({required this.text});
+  const _CopyRow({required this.text, this.onQr});
   final String text;
+  final VoidCallback? onQr;
   @override
   Widget build(BuildContext context) => Row(children: [
         Expanded(
-            child: SelectableText(text,
-                style: Theme.of(context).textTheme.titleLarge)),
+            child: SelectableText(text.split('?').first,
+                style: Theme.of(context).textTheme.titleMedium)),
+        if (onQr != null)
+          IconButton(
+            tooltip: 'QR-code',
+            icon: const Icon(Icons.qr_code_2),
+            onPressed: onQr,
+          ),
         IconButton(
           tooltip: 'Kopiëren',
           icon: const Icon(Icons.copy),
@@ -290,6 +407,48 @@ class _CopyRow extends StatelessWidget {
 
 // --- Client -----------------------------------------------------------------
 
+/// Verbindt (met voortgang en foutafhandeling) en opent de externe browser.
+Future<void> connectAndBrowse(BuildContext context, SavedConnection conn,
+    String password, {bool remember = false}) async {
+  FtpClient? client;
+  try {
+    client = await runWithProgress(
+        context,
+        conn.tls ? 'Versleuteld verbinden…' : 'Verbinden…',
+        (_) => services.ftp.connect(conn, password, remember: remember));
+  } catch (_) {
+    client = null;
+  }
+  if (client == null) return;
+  if (!context.mounted) {
+    await client.quit();
+    return;
+  }
+  await Navigator.push(
+      context,
+      MaterialPageRoute(
+          builder: (_) => FtpRemoteScreen(
+              client: client!,
+              title: '${conn.tls ? 'FTPS · ' : ''}${conn.host}:${conn.port}')));
+  await client.quit();
+}
+
+/// Opent een ftp://- of ftps://-link (bijv. gescand van een QR-code).
+Future<void> openFtpLink(BuildContext context, String url) async {
+  final parsed = SavedConnection.fromUrl(url);
+  if (parsed == null) {
+    showMessage(context, 'Ongeldige FTP-link');
+    return;
+  }
+  var (conn, password) = parsed;
+  if (password == null && conn.user.isNotEmpty) {
+    password = await askPassword(context,
+        title: 'Wachtwoord voor ${conn.user}', message: '${conn.host}:${conn.port}');
+    if (password == null || !context.mounted) return;
+  }
+  await connectAndBrowse(context, conn, password ?? '');
+}
+
 class _ClientTab extends StatefulWidget {
   const _ClientTab();
   @override
@@ -302,14 +461,21 @@ class _ClientTabState extends State<_ClientTab> {
   final _user = TextEditingController();
   final _pass = TextEditingController();
   bool _anonymous = false;
-  bool _busy = false;
+  bool _tls = false;
+  bool _remember = false;
+  SavedConnection? _selected;
 
-  void _fill(SavedConnection s) {
+  Future<void> _fill(SavedConnection s) async {
     _host.text = s.host;
     _port.text = '${s.port}';
     _user.text = s.user;
-    _pass.clear();
-    setState(() => _anonymous = s.user.isEmpty || s.user == 'anonymous');
+    _pass.text = await FtpController.savedPassword(s) ?? '';
+    setState(() {
+      _selected = s;
+      _anonymous = s.user.isEmpty || s.user == 'anonymous';
+      _tls = s.tls;
+      _remember = _pass.text.isNotEmpty;
+    });
   }
 
   Future<void> _connect() async {
@@ -319,28 +485,24 @@ class _ClientTabState extends State<_ClientTab> {
       showMessage(context, 'Vul een server in');
       return;
     }
-    setState(() => _busy = true);
-    try {
-      final user = _anonymous ? 'anonymous' : _user.text.trim();
-      final client = await FtpClient.connect(host,
-          port: port, user: user, password: _anonymous ? 'gast@' : _pass.text);
-      await services.ftp.saveConnection(SavedConnection(
-          host: host, port: port, user: _anonymous ? '' : user));
-      if (!mounted) {
-        await client.quit();
-        return;
-      }
-      await Navigator.push(
-          context,
-          MaterialPageRoute(
-              builder: (_) =>
-                  FtpRemoteScreen(client: client, title: '$host:$port')));
-      await client.quit();
-    } catch (e) {
-      if (mounted) showError(context, e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+    final user = _anonymous ? '' : _user.text.trim();
+    final prev = _selected;
+    // Vastgepind certificaat behouden als het dezelfde server is.
+    final conn = SavedConnection(
+        host: host,
+        port: port,
+        user: user,
+        tls: _tls,
+        fingerprint: prev != null &&
+                prev.host == host &&
+                prev.port == port &&
+                prev.tls == _tls
+            ? prev.fingerprint
+            : null);
+    if (!_remember) await FtpController.forgetPassword(conn);
+    if (!mounted) return;
+    // Fouten (ook een gewijzigd certificaat) toont runWithProgress.
+    await connectAndBrowse(context, conn, _pass.text, remember: _remember);
   }
 
   @override
@@ -371,6 +533,15 @@ class _ClientTabState extends State<_ClientTab> {
           ]),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
+            title: const Text('Versleuteld (FTPS)'),
+            subtitle: const Text(
+                'Expliciete TLS. Het certificaat wordt bij de eerste verbinding '
+                'onthouden en daarna gecontroleerd.'),
+            value: _tls,
+            onChanged: (v) => setState(() => _tls = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
             title: const Text('Anoniem'),
             value: _anonymous,
             onChanged: (v) => setState(() => _anonymous = v),
@@ -386,16 +557,18 @@ class _ClientTabState extends State<_ClientTab> {
               decoration: const InputDecoration(labelText: 'Wachtwoord'),
               onSubmitted: (_) => _connect(),
             ),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Wachtwoord onthouden'),
+              subtitle: const Text('Versleuteld bewaard; nodig voor automatische back-ups'),
+              value: _remember,
+              onChanged: (v) => setState(() => _remember = v ?? false),
+            ),
           ],
           const SizedBox(height: 16),
           FilledButton.icon(
-            onPressed: _busy ? null : _connect,
-            icon: _busy
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.login),
+            onPressed: _connect,
+            icon: Icon(_tls ? Icons.lock : Icons.login),
             label: const Text('Verbinden'),
           ),
           if (services.ftp.saved.isNotEmpty) ...[
@@ -404,13 +577,30 @@ class _ClientTabState extends State<_ClientTab> {
             for (final s in services.ftp.saved)
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.history),
+                leading: Icon(s.tls ? Icons.lock : Icons.history),
                 title: Text('${s.host}:${s.port}'),
-                subtitle: Text(s.user.isEmpty ? 'anoniem' : s.user),
+                subtitle: Text([
+                  s.user.isEmpty ? 'anoniem' : s.user,
+                  if (s.tls && s.fingerprint != null) 'certificaat onthouden',
+                ].join(' · ')),
                 onTap: () => _fill(s),
-                trailing: IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () => services.ftp.removeConnection(s),
+                trailing: PopupMenuButton<String>(
+                  onSelected: (a) async {
+                    if (a == 'remove') await services.ftp.removeConnection(s);
+                    if (a == 'cert') {
+                      await services.ftp.resetFingerprint(s);
+                      if (context.mounted) {
+                        showMessage(context,
+                            'Bij de volgende verbinding wordt het nieuwe certificaat onthouden');
+                      }
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    if (s.tls && s.fingerprint != null)
+                      const PopupMenuItem(
+                          value: 'cert', child: Text('Certificaat vergeten')),
+                    const PopupMenuItem(value: 'remove', child: Text('Verwijderen')),
+                  ],
                 ),
               ),
           ],

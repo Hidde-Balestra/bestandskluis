@@ -109,7 +109,8 @@ class _FtpRemoteScreenState extends State<FtpRemoteScreen> {
     final encrypted = VaultCrypto.isEncryptedName(p.basename(path)) &&
         services.vaults.vaultRootFor(file.parent.path) != null;
     final name = encrypted
-        ? VaultCrypto.plainName(p.basename(path))
+        ? VaultCrypto.plainName(
+            p.basename(path), services.vaults.keyForDir(file.parent.path))
         : p.basename(path);
     setState(() {
       _transfer = encrypted ? 'Ontsleutelen: $name' : 'Uploaden: $name';

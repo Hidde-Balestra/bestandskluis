@@ -1,0 +1,87 @@
+import 'dart:async';
+
+import 'package:flutter/services.dart';
+
+/// Wat de app van buitenaf binnenkrijgt.
+sealed class Incoming {
+  const Incoming();
+
+  static Incoming? fromMap(Object? raw) {
+    if (raw is! Map) return null;
+    return switch (raw['soort']) {
+      'bestanden' => SharedFiles(
+          ((raw['paden'] as List?) ?? const []).cast<String>().toList()),
+      'ftp' => FtpLink(raw['url'] as String),
+      'stopFtp' => const StopFtp(),
+      _ => null,
+    };
+  }
+}
+
+/// Bestanden gedeeld vanuit een andere app (kopieën in de cache).
+class SharedFiles extends Incoming {
+  const SharedFiles(this.paths);
+  final List<String> paths;
+}
+
+/// Een ftp://-link (bijv. uit een QR-code).
+class FtpLink extends Incoming {
+  const FtpLink(this.url);
+  final String url;
+}
+
+/// "Stoppen" in de melding van de FTP-server.
+class StopFtp extends Incoming {
+  const StopFtp();
+}
+
+/// Verbinding met de Android-kant (MainActivity / FtpService).
+class SystemBridge {
+  SystemBridge._();
+
+  static const _ch = MethodChannel('bestandskluis/systeem');
+  static final _incoming = StreamController<Incoming>.broadcast();
+
+  static Stream<Incoming> get incoming => _incoming.stream;
+
+  static void init() {
+    _ch.setMethodCallHandler((call) async {
+      if (call.method == 'binnenkomend') {
+        final i = Incoming.fromMap(call.arguments);
+        if (i != null) _incoming.add(i);
+      }
+    });
+  }
+
+  /// Het intent waarmee de app is gestart, als dat iets bracht.
+  static Future<Incoming?> initial() async {
+    try {
+      return Incoming.fromMap(await _ch.invokeMethod('binnenkomend'));
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  static Future<void> _call(String method, [Object? args]) async {
+    try {
+      await _ch.invokeMethod(method, args);
+    } on MissingPluginException {
+      // Geen Android (tests).
+    } on PlatformException {
+      // Negeren: functie niet beschikbaar.
+    }
+  }
+
+  /// Schermafbeeldingen blokkeren en inhoud verbergen bij "recente apps".
+  static Future<void> secureScreen(bool on) => _call('beveiligScherm', on);
+
+  static Future<void> startServerService(String text) =>
+      _call('startServerDienst', text);
+
+  static Future<void> stopServerService() => _call('stopServerDienst');
+
+  /// App naar de achtergrond in plaats van afsluiten.
+  static Future<void> moveToBack() => _call('naarAchtergrond');
+}

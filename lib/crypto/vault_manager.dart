@@ -69,9 +69,32 @@ class VaultManager extends ChangeNotifier implements VaultAccess {
     return jsonDecode(raw) as Map<String, dynamic>;
   }
 
-  /// Maakt van [dir] een kluis en versleutelt alle bestanden erin.
+  /// Schrijft het kluisbestand atomair (eerst naar een tijdelijk bestand).
+  Future<void> _writeMarker(String root, Map<String, dynamic> m) async {
+    final tmp = File(p.join(root, '$markerName.tmp'));
+    await tmp.writeAsString(const JsonEncoder.withIndent('  ').convert(m),
+        flush: true);
+    await tmp.rename(p.join(root, markerName));
+  }
+
+  /// Instellingen van een kluis die zonder sleutel leesbaar zijn.
+  Future<VaultInfo> info(String root) async {
+    final m = await _readMarker(_norm(root));
+    return VaultInfo(
+      version: m['versie'] as int? ?? 1,
+      encryptedNames: m['namen'] == true,
+      hasRecoveryCode: m['herstel'] != null,
+    );
+  }
+
+  /// Maakt van [dir] een kluis en versleutelt alle bestanden erin. Met
+  /// [encryptNames] worden ook de bestandsnamen versleuteld.
+  ///
+  /// Kluisversie 2: een willekeurige kluissleutel, ingepakt met een sleutel
+  /// uit het wachtwoord. Zo kan het wachtwoord later worden gewijzigd zonder
+  /// alle bestanden opnieuw te versleutelen.
   Future<void> create(String dir, String password,
-      {VaultProgress? onProgress}) async {
+      {bool encryptNames = false, VaultProgress? onProgress}) async {
     dir = _norm(dir);
     if (password.isEmpty) {
       throw ArgumentError('Wachtwoord mag niet leeg zijn');
@@ -84,33 +107,56 @@ class VaultManager extends ChangeNotifier implements VaultAccess {
         throw StateError('Er staat al een kluis in een submap');
       }
     }
+    final master = VaultCrypto.randomBytes(32);
     final salt = VaultCrypto.randomBytes(16);
-    final key = await VaultCrypto.deriveKey(password, salt, iterations);
-    final marker = {
-      'versie': 1,
+    final kek = await VaultCrypto.deriveKey(password, salt, iterations);
+    final marker = <String, dynamic>{
+      'versie': 2,
       'kdf': 'pbkdf2-sha256',
       'iteraties': iterations,
       'salt': base64.encode(salt),
-      'controle': await VaultCrypto.makeCheck(key),
+      'sleutel': await VaultCrypto.wrapKey(kek, master),
+      'controle': await VaultCrypto.makeCheck(SecretKey(master)),
+      'namen': encryptNames,
     };
-    await File(p.join(dir, markerName))
-        .writeAsString(const JsonEncoder.withIndent('  ').convert(marker));
-    _keys[dir] = key;
-    notifyListeners();
+    await _writeMarker(dir, marker);
+    await _setKey(dir, master, marker);
     await encryptPlainFiles(dir, onProgress: onProgress);
+  }
+
+  Future<void> _setKey(
+      String root, List<int> master, Map<String, dynamic> marker) async {
+    final names = marker['namen'] == true
+        ? await VaultCrypto.deriveNamesKey(SecretKey(master))
+        : null;
+    _keys[root] = VaultCrypto.vaultKey(master, names: names);
+    notifyListeners();
+  }
+
+  /// Kluissleutel uit een wachtwoord-achtige geheime waarde, of null.
+  Future<List<int>?> _openWith(Map<String, dynamic> wrapper, String secret,
+      Map<String, dynamic> marker) async {
+    final kek = await VaultCrypto.deriveKey(secret,
+        base64.decode(wrapper['salt'] as String), wrapper['iteraties'] as int);
+    final List<int>? master;
+    if (wrapper['sleutel'] is String) {
+      master = await VaultCrypto.unwrapKey(kek, wrapper['sleutel'] as String);
+    } else {
+      master = await kek.extractBytes(); // versie 1
+    }
+    if (master == null) return null;
+    final ok = await VaultCrypto.verifyCheck(
+        SecretKey(master), marker['controle'] as String);
+    return ok ? master : null;
   }
 
   /// Ontgrendelt een kluis. Geeft false bij een verkeerd wachtwoord.
   Future<bool> unlock(String root, String password) async {
     root = _norm(root);
     final m = await _readMarker(root);
-    final key = await VaultCrypto.deriveKey(
-        password, base64.decode(m['salt'] as String), m['iteraties'] as int);
-    if (!await VaultCrypto.verifyCheck(key, m['controle'] as String)) {
-      return false;
-    }
-    _keys[root] = key;
-    notifyListeners();
+    final master = await _openWith(m, password, m);
+    if (master == null) return false;
+    await _setKey(root, master, m);
     return true;
   }
 
@@ -122,8 +168,68 @@ class VaultManager extends ChangeNotifier implements VaultAccess {
     if (!await VaultCrypto.verifyCheck(key, m['controle'] as String)) {
       return false;
     }
-    _keys[root] = key;
-    notifyListeners();
+    await _setKey(root, await key.extractBytes(), m);
+    return true;
+  }
+
+  /// Wijzigt het wachtwoord van een ontgrendelde kluis. De bestanden
+  /// blijven ongewijzigd; een kluis van versie 1 wordt versie 2.
+  Future<void> changePassword(String root, String newPassword) async {
+    root = _norm(root);
+    final key = keyFor(root);
+    if (key == null) throw StateError('Kluis is vergrendeld');
+    if (newPassword.isEmpty) {
+      throw ArgumentError('Wachtwoord mag niet leeg zijn');
+    }
+    final m = await _readMarker(root);
+    final salt = VaultCrypto.randomBytes(16);
+    final kek = await VaultCrypto.deriveKey(newPassword, salt, iterations);
+    m
+      ..['versie'] = 2
+      ..['iteraties'] = iterations
+      ..['salt'] = base64.encode(salt)
+      ..['sleutel'] = await VaultCrypto.wrapKey(kek, await key.extractBytes());
+    await _writeMarker(root, m);
+  }
+
+  static const _codeAlphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+  static String normalizeRecoveryCode(String code) =>
+      code.toUpperCase().replaceAll(RegExp('[^A-Z0-9]'), '');
+
+  /// Maakt een (nieuwe) herstelcode voor een ontgrendelde kluis. Een
+  /// eerdere herstelcode werkt daarna niet meer.
+  Future<String> createRecoveryCode(String root) async {
+    root = _norm(root);
+    final key = keyFor(root);
+    if (key == null) throw StateError('Kluis is vergrendeld');
+    final rnd = VaultCrypto.randomBytes(24);
+    final raw = String.fromCharCodes(
+        rnd.map((b) => _codeAlphabet.codeUnitAt(b % _codeAlphabet.length)));
+    final salt = VaultCrypto.randomBytes(16);
+    final kek = await VaultCrypto.deriveKey(raw, salt, iterations);
+    final m = await _readMarker(root);
+    m['herstel'] = {
+      'iteraties': iterations,
+      'salt': base64.encode(salt),
+      'sleutel': await VaultCrypto.wrapKey(kek, await key.extractBytes()),
+    };
+    await _writeMarker(root, m);
+    // In groepjes van 4 voor de leesbaarheid.
+    return [
+      for (var i = 0; i < raw.length; i += 4) raw.substring(i, i + 4)
+    ].join('-');
+  }
+
+  /// Ontgrendelt een kluis met de herstelcode.
+  Future<bool> unlockWithRecoveryCode(String root, String code) async {
+    root = _norm(root);
+    final m = await _readMarker(root);
+    final r = m['herstel'];
+    if (r is! Map<String, dynamic>) return false;
+    final master = await _openWith(r, normalizeRecoveryCode(code), m);
+    if (master == null) return false;
+    await _setKey(root, master, m);
     return true;
   }
 
@@ -189,8 +295,8 @@ class VaultManager extends ChangeNotifier implements VaultAccess {
   /// Versleutelt [source] naar map [targetDir]. Geeft het nieuwe bestand.
   static Future<File> encryptInto(File source, String targetDir, SecretKey key,
       {bool deleteSource = false}) async {
-    final name = VaultCrypto.encryptedName(p.basename(source.path));
-    final target = uniqueFile(targetDir, name);
+    final target = uniqueFile(targetDir, p.basename(source.path),
+        encryptWith: key);
     await VaultCrypto.encryptFile(source, target, key);
     if (deleteSource) await source.delete();
     return target;
@@ -200,25 +306,45 @@ class VaultManager extends ChangeNotifier implements VaultAccess {
   static Future<File> decryptInto(File source, String targetDir, SecretKey key,
       {bool deleteSource = false, String? name}) async {
     final target = uniqueFile(
-        targetDir, name ?? VaultCrypto.plainName(p.basename(source.path)));
+        targetDir, name ?? VaultCrypto.plainName(p.basename(source.path), key));
     await VaultCrypto.decryptFile(source, target, key);
     if (deleteSource) await source.delete();
     return target;
   }
 
-  /// Een bestandsnaam in [dir] die nog niet bestaat ("foto (1).jpg").
-  static File uniqueFile(String dir, String name) {
-    var f = File(p.join(dir, name));
+  /// Een bestand in [dir] dat nog niet bestaat ("foto (1).jpg").
+  ///
+  /// [name] is de leesbare naam. Met [encryptWith] wordt het resultaat de
+  /// versleutelde naam voor die kluissleutel ("foto (1).jpg.bkv" of een
+  /// versleutelde naam). Een [name] die al versleuteld is, wordt eerst
+  /// teruggezet naar de leesbare naam (met [encryptWith] als sleutel).
+  static File uniqueFile(String dir, String name, {SecretKey? encryptWith}) {
+    var base = name;
+    var enc = encryptWith != null;
+    if (VaultCrypto.isEncryptedName(name)) {
+      base = VaultCrypto.plainName(name, encryptWith);
+      enc = true;
+    }
+    String real(String plain) =>
+        enc ? VaultCrypto.encryptedName(plain, encryptWith) : plain;
+    var f = File(p.join(dir, real(base)));
     if (!f.existsSync() && !Directory(f.path).existsSync()) return f;
-    final enc = VaultCrypto.isEncryptedName(name);
-    final base = enc ? VaultCrypto.plainName(name) : name;
     final ext = p.extension(base);
     final stem = p.basenameWithoutExtension(base);
     for (var i = 1;; i++) {
-      var candidate = '$stem ($i)$ext';
-      if (enc) candidate = VaultCrypto.encryptedName(candidate);
-      f = File(p.join(dir, candidate));
+      f = File(p.join(dir, real('$stem ($i)$ext')));
       if (!f.existsSync() && !Directory(f.path).existsSync()) return f;
     }
   }
+}
+
+/// Instellingen van een kluis.
+class VaultInfo {
+  const VaultInfo(
+      {required this.version,
+      required this.encryptedNames,
+      required this.hasRecoveryCode});
+  final int version;
+  final bool encryptedNames;
+  final bool hasRecoveryCode;
 }

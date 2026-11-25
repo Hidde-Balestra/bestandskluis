@@ -28,21 +28,130 @@ class VaultCrypto {
   static const tagLength = 16;
   static const defaultChunkSize = 256 * 1024;
 
-  /// Extensie van versleutelde bestanden.
+  /// Extensie van versleutelde bestanden met een leesbare naam.
   static const extension = '.bkv';
+
+  /// Extensie van versleutelde bestanden met een versleutelde naam.
+  static const nameExtension = '.bkx';
+
+  /// Maximale lengte van een bestandsnaam op Android.
+  static const maxNameBytes = 255;
 
   static final AesGcm _aes = AesGcm.with256bits();
   static final Hkdf _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   static final List<int> _hkdfInfo = utf8.encode('bestandskluis-bestand-v1');
+  static final _aesSync = DartAesGcm.with256bits();
+  static final _hmacSync = DartHmac.sha256();
+  static final List<int> _nameAad = utf8.encode('bestandskluis-naam-v1');
+
+  static bool _endsWith(String name, String ext) =>
+      name.length > ext.length && name.toLowerCase().endsWith(ext);
 
   static bool isEncryptedName(String name) =>
-      name.toLowerCase().endsWith(extension) && name.length > extension.length;
+      _endsWith(name, extension) || _endsWith(name, nameExtension);
 
-  static String plainName(String encryptedName) => isEncryptedName(encryptedName)
-      ? encryptedName.substring(0, encryptedName.length - extension.length)
-      : encryptedName;
+  /// Bestand waarvan ook de naam versleuteld is.
+  static bool hasEncryptedName(String name) => _endsWith(name, nameExtension);
 
-  static String encryptedName(String plainName) => '$plainName$extension';
+  /// Sleutel voor bestandsnamen, gekoppeld aan de kluissleutel van een kluis
+  /// met versleutelde namen.
+  static final _namesKeys = Expando<SecretKeyData>('namen');
+
+  /// Kluissleutel maken; met [names] worden bestandsnamen versleuteld.
+  static SecretKey vaultKey(List<int> master, {SecretKeyData? names}) {
+    final key = SecretKeyData(master);
+    if (names != null) _namesKeys[key] = names;
+    return key;
+  }
+
+  static SecretKeyData? _namesKey(SecretKey? key) =>
+      key == null ? null : _namesKeys[key];
+
+  /// Oorspronkelijke naam van een versleuteld bestand. Bij een versleutelde
+  /// naam is [key] nodig; zonder (juiste) sleutel komt de naam ongewijzigd
+  /// terug.
+  static String plainName(String encryptedName, [SecretKey? key]) {
+    if (_endsWith(encryptedName, nameExtension)) {
+      final names = _namesKey(key);
+      if (names == null) return encryptedName;
+      try {
+        final raw = base64Url.decode(base64Url.normalize(encryptedName
+            .substring(0, encryptedName.length - nameExtension.length)));
+        if (raw.length < 12 + tagLength) return encryptedName;
+        final clear = _aesSync.decryptSync(
+          SecretBox(raw.sublist(12, raw.length - tagLength),
+              nonce: raw.sublist(0, 12),
+              mac: Mac(raw.sublist(raw.length - tagLength))),
+          secretKeyData: names,
+          aad: _nameAad,
+        );
+        return utf8.decode(clear);
+      } catch (_) {
+        return encryptedName;
+      }
+    }
+    if (_endsWith(encryptedName, extension)) {
+      return encryptedName.substring(0, encryptedName.length - extension.length);
+    }
+    return encryptedName;
+  }
+
+  /// Bestandsnaam op schijf voor [plainName]. Als [key] een sleutel voor
+  /// namen heeft, wordt de naam deterministisch versleuteld (de nonce is een
+  /// HMAC van de naam), zodat dezelfde naam altijd hetzelfde resultaat geeft
+  /// en bestanden op naam terug te vinden zijn.
+  static String encryptedName(String plainName, [SecretKey? key]) {
+    final names = _namesKey(key);
+    if (names == null) return '$plainName$extension';
+    final clear = utf8.encode(plainName);
+    final nonce = _hmacSync
+        .calculateMacSync(clear, secretKeyData: names, nonce: const [])
+        .bytes
+        .sublist(0, 12);
+    final box = _aesSync.encryptSync(clear,
+        secretKeyData: names, nonce: nonce, aad: _nameAad);
+    final encoded = base64Url
+        .encode([...nonce, ...box.cipherText, ...box.mac.bytes])
+        .replaceAll('=', '');
+    final result = '$encoded$nameExtension';
+    if (result.length > maxNameBytes) {
+      throw StateError('Bestandsnaam is te lang voor een kluis met '
+          'versleutelde namen (maximaal ongeveer 150 tekens)');
+    }
+    return result;
+  }
+
+  /// Sleutel voor bestandsnamen, afgeleid van de kluissleutel.
+  static Future<SecretKeyData> deriveNamesKey(SecretKey master) async {
+    final k = await _hkdf.deriveKey(
+        secretKey: master,
+        nonce: utf8.encode('namen'),
+        info: utf8.encode('bestandskluis-namen-v1'));
+    return SecretKeyData(await k.extractBytes());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sleutel inpakken (kluis versie 2: wachtwoord wijzigen, herstelcode)
+
+  static final List<int> _wrapAad = utf8.encode('bestandskluis-sleutel-v2');
+
+  /// Versleutelt de kluissleutel [master] met [kek].
+  static Future<String> wrapKey(SecretKey kek, List<int> master) async {
+    final box = await _aes.encrypt(master,
+        secretKey: kek, nonce: randomBytes(12), aad: _wrapAad);
+    return base64.encode(box.concatenation());
+  }
+
+  /// Pakt de kluissleutel uit; null als [kek] niet klopt.
+  static Future<List<int>?> unwrapKey(SecretKey kek, String wrapped) async {
+    try {
+      final box = SecretBox.fromConcatenation(base64.decode(wrapped),
+          nonceLength: 12, macLength: tagLength);
+      return await _aes.decrypt(box, secretKey: kek, aad: _wrapAad);
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Lengte van de oorspronkelijke inhoud, berekend uit de versleutelde lengte.
   static int plainLength(int cipherLength,

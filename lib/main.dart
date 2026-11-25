@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:workmanager/workmanager.dart';
 
 import 'app_services.dart';
 import 'screens/home_screen.dart';
+import 'services/backup.dart';
 import 'services/storage.dart';
+import 'services/system_bridge.dart';
 import 'services/temp_files.dart';
 
 Future<void> main() async {
@@ -17,9 +20,17 @@ Future<void> main() async {
   await services.known.load();
   await services.settings.load();
   await services.biometric.load();
+  await services.intruders.load();
   // Sleutels van kluizen die niet meer bestaan opruimen.
   for (final root in services.biometric.enrolled) {
     if (!services.vaults.isVaultRoot(root)) await services.biometric.removeKey(root);
+  }
+  await services.backup.load();
+  SystemBridge.init();
+  try {
+    await Workmanager().initialize(backupDispatcher);
+  } catch (_) {
+    // Achtergrondtaken niet beschikbaar.
   }
   runApp(const BestandskluisApp());
 }
