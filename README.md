@@ -15,11 +15,12 @@ Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP-serv
 - Bladeren door interne opslag en SD-kaart, met snelkoppelingen (Downloads, Camera, …)
 - Lijst- en galerijweergave, verborgen bestanden tonen
 - Kopiëren, knippen/plakken, hernoemen, verwijderen, nieuwe map, delen
-- Meerdere items selecteren (lang indrukken)
+- Meerdere items selecteren (lang indrukken) of **alles selecteren** met de knop bovenin
 
 ### Galerij
 - Alle foto's en video's van het toestel per album
 - Viewer met zoomen, vegen en een videospeler
+- Alles selecteren (hele album) om te delen of naar een kluis te verplaatsen
 - **Naar kluis verplaatsen**: selecteer foto's/video's, versleutel ze in een kluis en verwijder ze uit de galerij
 - Tabblad **Kluizen**: foto's en video's uit ontgrendelde kluizen
 
@@ -30,7 +31,8 @@ Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP-serv
 - Bestanden in de kluis (ook in submappen) worden opgeslagen als `naam.ext.bkv`
 - Ontgrendelen met een wachtwoord; de sleutel staat alleen in het werkgeheugen
 - Bestanden die je in een kluis plakt worden automatisch versleuteld; bestanden die je eruit haalt automatisch ontsleuteld
-- Automatisch vergrendelen na 5 minuten op de achtergrond (behalve als de FTP-server draait)
+- **Ontgrendelen met vingerafdruk** (in te schakelen bij *Instellingen*): na één keer ontgrendelen met het wachtwoord wordt de kluissleutel (niet het wachtwoord) bewaard in de door de Android Keystore beschermde opslag van de app, en alleen na een geslaagde vingerafdrukcontrole gebruikt. Per kluis aan/uit te zetten; uitschakelen wist alle bewaarde sleutels.
+- Automatisch vergrendelen na 1, 5 (standaard), 15 of 30 minuten op de achtergrond, of nooit (instelbaar; niet zolang de FTP-server draait)
 - **Delen = tijdelijk ontsleutelen**: bij delen wordt een ontsleutelde kopie in de cache van de app gemaakt. Die wordt na 10 minuten verwijderd, en in elk geval bij de volgende start van de app. De kluis zelf blijft versleuteld.
 
 ### FTP

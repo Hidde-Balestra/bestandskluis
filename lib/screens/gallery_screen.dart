@@ -92,6 +92,18 @@ class _GalleryScreenState extends State<GalleryScreen> {
     });
   }
 
+  /// Alle media van het album selecteren (laadt eerst de overige pagina's).
+  Future<void> _selectAll() async {
+    while (_hasMore && mounted) {
+      if (_loading) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        continue;
+      }
+      await _loadMore();
+    }
+    if (mounted) setState(() => _selected.addAll(_assets.map((a) => a.id)));
+  }
+
   Future<void> _loadVaultMedia() async {
     final files = <File>[];
     for (final root in services.vaults.unlockedVaults) {
@@ -219,6 +231,16 @@ class _GalleryScreenState extends State<GalleryScreen> {
                   onPressed: () => setState(_selected.clear)),
               title: Text('${_selected.length} geselecteerd'),
               actions: [
+                if (_hasMore || _selected.length < _assets.length)
+                  IconButton(
+                      tooltip: 'Alles selecteren',
+                      icon: const Icon(Icons.select_all),
+                      onPressed: _selectAll)
+                else
+                  IconButton(
+                      tooltip: 'Niets selecteren',
+                      icon: const Icon(Icons.deselect),
+                      onPressed: () => setState(_selected.clear)),
                 IconButton(
                   tooltip: 'Delen',
                   icon: const Icon(Icons.share),
@@ -240,7 +262,13 @@ class _GalleryScreenState extends State<GalleryScreen> {
                 ),
               ],
             )
-          : AppBar(title: const Text('Galerij')),
+          : AppBar(title: const Text('Galerij'), actions: [
+              if (!_vaultMode && _assets.isNotEmpty)
+                IconButton(
+                    tooltip: 'Alles selecteren',
+                    icon: const Icon(Icons.select_all),
+                    onPressed: _selectAll),
+            ]),
       body: Column(children: [
         if (!selecting) _albumBar(),
         Expanded(child: _vaultMode ? _vaultGrid() : _deviceGrid()),

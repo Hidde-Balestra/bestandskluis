@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:bestandskluis/crypto/vault_crypto.dart';
+import 'package:cryptography/cryptography.dart';
 import 'package:bestandskluis/crypto/vault_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -54,6 +55,23 @@ void main() {
     await expectLater(vm.create(outer.path, 'a'), throwsStateError);
     final deeper = Directory(p.join(inner.path, 'x'))..createSync();
     await expectLater(vm.create(deeper.path, 'a'), throwsStateError);
+  });
+
+  test('ontgrendelen met bewaarde sleutel (vingerafdruk)', () async {
+    final a = Directory(p.join(tmp.path, 'a'))..createSync();
+    final b = Directory(p.join(tmp.path, 'b'))..createSync();
+    await vm.create(a.path, 'een');
+    await vm.create(b.path, 'twee');
+    final keyA = vm.keyFor(a.path)!;
+    final bytes = await keyA.extractBytes();
+    vm.lockAll();
+
+    // Sleutel van een andere kluis wordt geweigerd.
+    expect(await vm.unlockWithKey(b.path, keyA), isFalse);
+    expect(vm.isUnlocked(b.path), isFalse);
+
+    expect(await vm.unlockWithKey(a.path, SecretKey(bytes)), isTrue);
+    expect(vm.isUnlocked(a.path), isTrue);
   });
 
   test('uniqueFile voorkomt overschrijven', () {

@@ -5,6 +5,7 @@ import '../services/temp_files.dart';
 import 'browser_screen.dart';
 import 'ftp_screen.dart';
 import 'gallery_screen.dart';
+import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -14,10 +15,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
-  /// Kluizen vergrendelen na zo lang op de achtergrond (tenzij de FTP-server
-  /// draait: die heeft de sleutels nodig om ontsleuteld te kunnen delen).
-  static const autoLockAfter = Duration(minutes: 5);
-
   int _tab = 0;
   final Set<int> _visited = {0};
   DateTime? _pausedAt;
@@ -42,7 +39,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final at = _pausedAt;
       _pausedAt = null;
       if (at != null &&
-          DateTime.now().difference(at) > autoLockAfter &&
+          services.settings.autoLockMinutes > 0 &&
+          DateTime.now().difference(at) >
+              Duration(minutes: services.settings.autoLockMinutes) &&
           !services.ftp.isRunning &&
           services.vaults.unlockedVaults.isNotEmpty) {
         services.vaults.lockAll();
@@ -64,6 +63,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           // tegelijk om rechten).
           _visited.contains(1) ? const GalleryScreen() : const SizedBox(),
           _visited.contains(2) ? const FtpScreen() : const SizedBox(),
+          _visited.contains(3) ? const SettingsScreen() : const SizedBox(),
         ],
       ),
       bottomNavigationBar: ListenableBuilder(
@@ -91,6 +91,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     isLabelVisible: services.ftp.isRunning,
                     child: const Icon(Icons.dns)),
                 label: 'FTP'),
+            const NavigationDestination(
+                icon: Icon(Icons.settings_outlined),
+                selectedIcon: Icon(Icons.settings),
+                label: 'Instellingen'),
           ],
         ),
       ),

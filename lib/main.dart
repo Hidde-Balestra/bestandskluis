@@ -15,6 +15,12 @@ Future<void> main() async {
   final roots = await Storage.roots();
   await services.ftp.load(roots.first.path);
   await services.known.load();
+  await services.settings.load();
+  await services.biometric.load();
+  // Sleutels van kluizen die niet meer bestaan opruimen.
+  for (final root in services.biometric.enrolled) {
+    if (!services.vaults.isVaultRoot(root)) await services.biometric.removeKey(root);
+  }
   runApp(const BestandskluisApp());
 }
 

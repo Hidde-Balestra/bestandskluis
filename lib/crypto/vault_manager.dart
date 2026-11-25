@@ -114,6 +114,19 @@ class VaultManager extends ChangeNotifier implements VaultAccess {
     return true;
   }
 
+  /// Ontgrendelt een kluis met een eerder bewaarde sleutel (vingerafdruk).
+  /// Geeft false als de sleutel niet (meer) bij de kluis hoort.
+  Future<bool> unlockWithKey(String root, SecretKey key) async {
+    root = _norm(root);
+    final m = await _readMarker(root);
+    if (!await VaultCrypto.verifyCheck(key, m['controle'] as String)) {
+      return false;
+    }
+    _keys[root] = key;
+    notifyListeners();
+    return true;
+  }
+
   void lock(String root) {
     if (_keys.remove(_norm(root)) != null) notifyListeners();
   }

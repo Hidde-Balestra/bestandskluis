@@ -12,6 +12,7 @@ import '../services/temp_files.dart';
 import '../util/format.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/dialogs.dart';
+import '../widgets/vault_unlock.dart';
 import 'media_viewer.dart';
 
 class FsItem {
@@ -157,16 +158,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   // --- Kluizen --------------------------------------------------------------
 
-  Future<bool> _unlock(String root) async {
-    final pw = await askPassword(context,
-        title: 'Kluis ontgrendelen', message: p.basename(root));
-    if (pw == null || !mounted) return false;
-    final ok = await runWithProgress(
-        context, 'Ontgrendelen…', (_) => vaults.unlock(root, pw));
-    if (ok == false && mounted) showMessage(context, 'Onjuist wachtwoord');
-    if (ok == true) await services.known.add(root);
-    return ok == true;
-  }
+  Future<bool> _unlock(String root) => unlockVault(context, root);
 
   /// Bestaande map (met inhoud) omzetten naar een kluis.
   Future<void> _createVault(String path) async {
@@ -186,6 +178,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       await vaults.create(path, pw,
           onProgress: (d, t, n) => update('$d / $t\n$n'));
       await services.known.add(path);
+      await rememberForBiometric(path);
     });
     _reload();
   }
@@ -232,6 +225,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
         rethrow;
       }
       await services.known.add(dir.path);
+      await rememberForBiometric(dir.path);
       return true;
     });
     if (ok == true && mounted) {
@@ -294,6 +288,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       await vaults.removeVault(root,
           onProgress: (d, t, n) => update('$d / $t\n$n'));
       await services.known.remove(root);
+      await forgetBiometric(root);
     });
   }
 
@@ -396,6 +391,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (!ok || !mounted) return;
     await runWithProgress(context, 'Verwijderen…',
         (_) => services.ops.delete(items.map((i) => i.entity).toList()));
+    for (final i in items.where((i) => i.isVault)) {
+      await forgetBiometric(i.path);
+    }
     _reload();
   }
 
@@ -408,6 +406,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       if (item.isVault) {
         vaults.lock(item.path);
         await services.known.remove(item.path);
+        await forgetBiometric(item.path);
         await services.known.add(p.join(p.dirname(item.path), name));
       }
     } catch (e) {
@@ -558,11 +557,17 @@ class _BrowserScreenState extends State<BrowserScreen> {
           onPressed: () => setState(_selected.clear)),
       title: Text('${_selected.length} geselecteerd'),
       actions: [
-        IconButton(
-            tooltip: 'Alles selecteren',
-            icon: const Icon(Icons.select_all),
-            onPressed: () =>
-                setState(() => _selected.addAll(_items.map((i) => i.path)))),
+        if (_selected.length < _items.length)
+          IconButton(
+              tooltip: 'Alles selecteren',
+              icon: const Icon(Icons.select_all),
+              onPressed: () =>
+                  setState(() => _selected.addAll(_items.map((i) => i.path))))
+        else
+          IconButton(
+              tooltip: 'Niets selecteren',
+              icon: const Icon(Icons.deselect),
+              onPressed: () => setState(_selected.clear)),
         IconButton(
             tooltip: 'Delen',
             icon: const Icon(Icons.share),
@@ -625,6 +630,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
         ],
       ),
       actions: [
+        if (dir != null &&
+            !_vaultLocked &&
+            !widget.pickFileMode &&
+            _items.isNotEmpty)
+          IconButton(
+              tooltip: 'Alles selecteren',
+              icon: const Icon(Icons.select_all),
+              onPressed: () =>
+                  setState(() => _selected.addAll(_items.map((i) => i.path)))),
         if (dir != null && !_vaultLocked)
           IconButton(
               tooltip: _grid ? 'Lijst' : 'Galerijweergave',

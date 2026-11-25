@@ -1,5 +1,6 @@
 package nl.hiddebalestra.bestandskluis
 
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 
-class MainActivity : FlutterActivity()
+// FlutterFragmentActivity is nodig voor de vingerafdrukprompt (local_auth).
+class MainActivity : FlutterFragmentActivity()
