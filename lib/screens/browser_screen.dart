@@ -1,0 +1,837 @@
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:path/path.dart' as p;
+
+import '../app_services.dart';
+import '../crypto/vault_crypto.dart';
+import '../crypto/vault_manager.dart';
+import '../services/storage.dart';
+import '../services/temp_files.dart';
+import '../util/format.dart';
+import '../widgets/dialogs.dart';
+import 'media_viewer.dart';
+
+class FsItem {
+  FsItem(this.entity,
+      {required this.isDir,
+      required this.size,
+      required this.modified,
+      required this.encrypted,
+      required this.isVault});
+
+  final FileSystemEntity entity;
+  final bool isDir;
+  final int size;
+  final DateTime modified;
+
+  /// Versleuteld bestand in een kluis.
+  final bool encrypted;
+
+  /// Map die zelf een kluis is.
+  final bool isVault;
+
+  String get realName => p.basename(entity.path);
+  String get name => encrypted ? VaultCrypto.plainName(realName) : realName;
+  String get path => entity.path;
+}
+
+class BrowserScreen extends StatefulWidget {
+  const BrowserScreen({super.key, this.pickFileMode = false});
+
+  /// Als bestandskiezer: tikken op een bestand geeft het pad terug.
+  final bool pickFileMode;
+
+  @override
+  State<BrowserScreen> createState() => _BrowserScreenState();
+}
+
+class _BrowserScreenState extends State<BrowserScreen> {
+  VaultManager get vaults => services.vaults;
+
+  List<StorageRoot> _roots = [];
+  String? _dir; // null = overzicht van opslaglocaties
+  List<FsItem> _items = [];
+  bool _loading = false;
+  bool _permission = true;
+  bool _showHidden = false;
+  bool _grid = false;
+  String? _error;
+  int _plainInVault = 0;
+  final Set<String> _selected = {};
+
+  String? get _vaultRoot => _dir == null ? null : vaults.vaultRootFor(_dir!);
+  bool get _inVault => _vaultRoot != null;
+  bool get _vaultLocked => _inVault && !vaults.isUnlocked(_vaultRoot!);
+  bool get _selecting => _selected.isNotEmpty;
+
+  @override
+  void initState() {
+    super.initState();
+    vaults.addListener(_reload);
+    _init();
+  }
+
+  @override
+  void dispose() {
+    vaults.removeListener(_reload);
+    super.dispose();
+  }
+
+  Future<void> _init() async {
+    _permission = await Storage.ensurePermission();
+    _roots = await Storage.roots();
+    if (mounted) setState(() {});
+  }
+
+  void _reload() {
+    if (mounted) _open(_dir, keepSelection: true);
+  }
+
+  Future<void> _open(String? dir, {bool keepSelection = false}) async {
+    if (!keepSelection) _selected.clear();
+    setState(() {
+      _dir = dir;
+      _loading = dir != null;
+      _error = null;
+    });
+    if (dir == null) return;
+    try {
+      final key = vaults.keyForDir(dir);
+      final inVault = vaults.vaultRootFor(dir) != null;
+      final items = <FsItem>[];
+      var plain = 0;
+      await for (final e in Directory(dir).list(followLinks: false)) {
+        final name = p.basename(e.path);
+        if (name == VaultManager.markerName || name.endsWith('.part')) continue;
+        if (!_showHidden && name.startsWith('.')) continue;
+        try {
+          final st = await e.stat();
+          final isDir = st.type == FileSystemEntityType.directory;
+          final enc = !isDir && inVault && VaultCrypto.isEncryptedName(name);
+          if (!isDir && inVault && !enc) plain++;
+          items.add(FsItem(e,
+              isDir: isDir,
+              size: enc ? VaultCrypto.plainLength(st.size) : st.size,
+              modified: st.modified,
+              encrypted: enc,
+              isVault: isDir && vaults.isVaultRoot(e.path)));
+        } on FileSystemException {
+          continue;
+        }
+      }
+      items.sort((a, b) {
+        if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+      if (!mounted || _dir != dir) return;
+      setState(() {
+        _items = items;
+        _plainInVault = key != null ? plain : 0;
+        _selected.removeWhere((s) => !items.any((i) => i.path == s));
+        _loading = false;
+      });
+    } on FileSystemException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _items = [];
+        _loading = false;
+        _error = e.osError?.message ?? e.message;
+      });
+    }
+  }
+
+  void _up() {
+    final dir = _dir;
+    if (dir == null) return;
+    if (_roots.any((r) => p.equals(r.path, dir))) {
+      _open(null);
+    } else {
+      _open(p.dirname(dir));
+    }
+  }
+
+  // --- Kluizen --------------------------------------------------------------
+
+  Future<bool> _unlock(String root) async {
+    final pw = await askPassword(context,
+        title: 'Kluis ontgrendelen', message: p.basename(root));
+    if (pw == null || !mounted) return false;
+    final ok = await runWithProgress(
+        context, 'Ontgrendelen…', (_) => vaults.unlock(root, pw));
+    if (ok == false && mounted) showMessage(context, 'Onjuist wachtwoord');
+    return ok == true;
+  }
+
+  Future<void> _createVault(FsItem item) async {
+    final ok = await confirmDialog(context,
+        title: 'Map versleutelen',
+        message:
+            'Alle bestanden in "${item.name}" (ook in submappen) worden met AES-256 '
+            'versleuteld. Zonder het wachtwoord zijn ze niet meer te openen — '
+            'er is geen herstelmogelijkheid.',
+        confirm: 'Doorgaan');
+    if (!ok || !mounted) return;
+    final pw = await askPassword(context,
+        title: 'Wachtwoord voor de kluis', repeat: true);
+    if (pw == null || !mounted) return;
+    await runWithProgress(context, 'Versleutelen…', (update) async {
+      update('Sleutel afleiden…');
+      await vaults.create(item.path, pw,
+          onProgress: (d, t, n) => update('$d / $t\n$n'));
+    });
+    _reload();
+  }
+
+  Future<void> _removeVault(String root) async {
+    final ok = await confirmDialog(context,
+        title: 'Versleuteling opheffen',
+        message: 'Alle bestanden in deze kluis worden permanent ontsleuteld '
+            'en de map wordt weer een gewone map.',
+        confirm: 'Ontsleutelen',
+        destructive: true);
+    if (!ok || !mounted) return;
+    await runWithProgress(context, 'Ontsleutelen…', (update) async {
+      await vaults.removeVault(root,
+          onProgress: (d, t, n) => update('$d / $t\n$n'));
+    });
+  }
+
+  Future<void> _encryptPlain() async {
+    final root = _vaultRoot;
+    if (root == null) return;
+    await runWithProgress(context, 'Versleutelen…', (update) async {
+      await vaults.encryptPlainFiles(root,
+          onProgress: (d, t, n) => update('$d / $t\n$n'));
+    });
+  }
+
+  // --- Openen ---------------------------------------------------------------
+
+  MediaItem _mediaItem(FsItem i) {
+    final f = i.entity as File;
+    return MediaItem(
+      name: i.name,
+      isVideo: kindOf(i.name) == FileKind.video,
+      encrypted: i.encrypted,
+      load: () => TempFiles.plainFor(f, services.ops.keyForFile(f)),
+      share: () => TempFiles.share([f], vaults).then((_) {}),
+    );
+  }
+
+  Future<void> _tap(FsItem item) async {
+    if (_selecting) {
+      _toggle(item);
+      return;
+    }
+    if (item.isDir) {
+      if (item.isVault && !vaults.isUnlocked(item.path)) {
+        if (!await _unlock(item.path)) return;
+      }
+      _open(item.path);
+      return;
+    }
+    if (widget.pickFileMode) {
+      Navigator.pop(context, item.path);
+      return;
+    }
+    final file = item.entity as File;
+    if (isMedia(item.name)) {
+      final media = _items.where((i) => !i.isDir && isMedia(i.name)).toList();
+      await Navigator.push(
+          context,
+          MaterialPageRoute(
+              builder: (_) => MediaViewer(
+                  items: media.map(_mediaItem).toList(),
+                  initialIndex: media.indexOf(item))));
+      return;
+    }
+    final plain = await runWithProgress(
+        context,
+        item.encrypted ? 'Ontsleutelen…' : 'Openen…',
+        (_) => TempFiles.plainFor(file, services.ops.keyForFile(file)));
+    if (plain == null) return;
+    final r = await OpenFilex.open(plain.path);
+    if (r.type != ResultType.done && mounted) {
+      showMessage(context, 'Geen app gevonden om dit bestand te openen');
+    }
+  }
+
+  void _toggle(FsItem item) => setState(() {
+        if (!_selected.remove(item.path)) _selected.add(item.path);
+      });
+
+  List<FsItem> get _selectedItems =>
+      _items.where((i) => _selected.contains(i.path)).toList();
+
+  // --- Acties ---------------------------------------------------------------
+
+  Future<void> _share(List<FsItem> items) async {
+    final files = items.where((i) => !i.isDir).map((i) => i.entity as File).toList();
+    if (files.isEmpty) {
+      showMessage(context, 'Alleen bestanden kunnen worden gedeeld');
+      return;
+    }
+    final encrypted = items.any((i) => i.encrypted);
+    await runWithProgress(
+      context,
+      encrypted ? 'Tijdelijk ontsleutelen…' : 'Delen…',
+      (update) => TempFiles.share(files, vaults,
+          onProgress: (d, t) => update('$d / $t')),
+    );
+    if (encrypted && mounted) {
+      showMessage(context,
+          'Ontsleutelde kopie wordt over ${TempFiles.shareDelay.inMinutes} minuten verwijderd');
+    }
+    setState(_selected.clear);
+  }
+
+  Future<void> _delete(List<FsItem> items) async {
+    final names = items.length == 1 ? '"${items.first.name}"' : '${items.length} items';
+    final ok = await confirmDialog(context,
+        title: 'Verwijderen',
+        message: '$names permanent verwijderen?',
+        confirm: 'Verwijderen',
+        destructive: true);
+    if (!ok || !mounted) return;
+    await runWithProgress(context, 'Verwijderen…',
+        (_) => services.ops.delete(items.map((i) => i.entity).toList()));
+    _reload();
+  }
+
+  Future<void> _rename(FsItem item) async {
+    final name = await askText(context,
+        title: 'Hernoemen', initial: item.name, confirm: 'Hernoemen');
+    if (name == null || name.isEmpty || name == item.name || !mounted) return;
+    try {
+      await services.ops.rename(item.entity, name);
+      if (item.isVault) vaults.lock(item.path);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+    _reload();
+  }
+
+  void _toClipboard(List<FsItem> items, {required bool move}) {
+    services.clipboard = items.map((i) => i.entity).toList();
+    services.clipboardMove = move;
+    setState(_selected.clear);
+    showMessage(context,
+        '${items.length} item(s) ${move ? 'geknipt' : 'gekopieerd'} — kies een map en tik op Plakken');
+  }
+
+  Future<void> _paste() async {
+    final dir = _dir;
+    if (dir == null) return;
+    final items = services.clipboard;
+    final move = services.clipboardMove;
+    await runWithProgress(context, move ? 'Verplaatsen…' : 'Kopiëren…',
+        (update) async {
+      await services.ops.transfer(items, dir, move: move, onItem: update);
+    });
+    if (move) services.clipboard = [];
+    _reload();
+  }
+
+  Future<void> _newFolder() async {
+    final name = await askText(context,
+        title: 'Nieuwe map', initial: 'Nieuwe map', confirm: 'Maken');
+    if (name == null || name.isEmpty || _dir == null) return;
+    try {
+      await Directory(p.join(_dir!, name)).create();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+    _reload();
+  }
+
+  void _details(FsItem item) {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(item.name, style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 12),
+              SelectableText('Pad: ${item.path}'),
+              if (!item.isDir) Text('Grootte: ${formatSize(item.size)}'),
+              Text('Gewijzigd: ${formatDate(item.modified)}'),
+              if (item.encrypted)
+                const Text('Versleuteld met AES-256-GCM'),
+              if (item.isVault)
+                Text(vaults.isUnlocked(item.path)
+                    ? 'Kluis (ontgrendeld)'
+                    : 'Kluis (vergrendeld)'),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _itemMenu(FsItem item, String action) async {
+    switch (action) {
+      case 'share':
+        await _share([item]);
+      case 'rename':
+        await _rename(item);
+      case 'copy':
+        _toClipboard([item], move: false);
+      case 'move':
+        _toClipboard([item], move: true);
+      case 'delete':
+        await _delete([item]);
+      case 'encrypt':
+        await _createVault(item);
+      case 'lock':
+        vaults.lock(item.path);
+        await TempFiles.clearViewCache();
+      case 'decrypt':
+        if (!vaults.isUnlocked(item.path) && !await _unlock(item.path)) return;
+        await _removeVault(item.path);
+      case 'details':
+        _details(item);
+    }
+  }
+
+  // --- Opbouw ---------------------------------------------------------------
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: _dir == null && !_selecting,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (_selecting) {
+          setState(_selected.clear);
+        } else {
+          _up();
+        }
+      },
+      child: Scaffold(
+        appBar: _selecting ? _selectionBar() : _normalBar(),
+        body: _body(),
+        floatingActionButton: _fab(),
+      ),
+    );
+  }
+
+  Widget? _fab() {
+    if (_dir == null || _selecting || _vaultLocked || widget.pickFileMode) {
+      return null;
+    }
+    if (services.clipboard.isNotEmpty) {
+      return FloatingActionButton.extended(
+        onPressed: _paste,
+        icon: const Icon(Icons.content_paste),
+        label: Text('Plakken (${services.clipboard.length})'),
+      );
+    }
+    return null;
+  }
+
+  PreferredSizeWidget _selectionBar() {
+    final items = _selectedItems;
+    return AppBar(
+      leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: () => setState(_selected.clear)),
+      title: Text('${_selected.length} geselecteerd'),
+      actions: [
+        IconButton(
+            tooltip: 'Alles selecteren',
+            icon: const Icon(Icons.select_all),
+            onPressed: () =>
+                setState(() => _selected.addAll(_items.map((i) => i.path)))),
+        IconButton(
+            tooltip: 'Delen',
+            icon: const Icon(Icons.share),
+            onPressed: () => _share(items)),
+        IconButton(
+            tooltip: 'Verwijderen',
+            icon: const Icon(Icons.delete_outline),
+            onPressed: () => _delete(items)),
+        PopupMenuButton<String>(
+          onSelected: (a) {
+            switch (a) {
+              case 'copy':
+                _toClipboard(items, move: false);
+              case 'move':
+                _toClipboard(items, move: true);
+              case 'rename':
+                _rename(items.single);
+            }
+          },
+          itemBuilder: (_) => [
+            const PopupMenuItem(value: 'copy', child: Text('Kopiëren')),
+            const PopupMenuItem(value: 'move', child: Text('Knippen')),
+            if (items.length == 1)
+              const PopupMenuItem(value: 'rename', child: Text('Hernoemen')),
+          ],
+        ),
+      ],
+    );
+  }
+
+  PreferredSizeWidget _normalBar() {
+    final dir = _dir;
+    final root = _vaultRoot;
+    return AppBar(
+      leading: dir == null
+          ? null
+          : IconButton(icon: const Icon(Icons.arrow_upward), onPressed: _up),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            if (root != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: Icon(_vaultLocked ? Icons.lock : Icons.lock_open,
+                    size: 18),
+              ),
+            Flexible(
+              child: Text(
+                  dir == null
+                      ? (widget.pickFileMode ? 'Kies een bestand' : 'Bestanden')
+                      : _rootLabel(dir),
+                  overflow: TextOverflow.ellipsis),
+            ),
+          ]),
+          if (dir != null)
+            Text(dir,
+                style: Theme.of(context).textTheme.bodySmall,
+                overflow: TextOverflow.ellipsis),
+        ],
+      ),
+      actions: [
+        if (dir != null && !_vaultLocked)
+          IconButton(
+              tooltip: _grid ? 'Lijst' : 'Galerijweergave',
+              icon: Icon(_grid ? Icons.view_list : Icons.grid_view),
+              onPressed: () => setState(() => _grid = !_grid)),
+        if (dir != null)
+          PopupMenuButton<String>(
+            onSelected: (a) async {
+              switch (a) {
+                case 'folder':
+                  await _newFolder();
+                case 'hidden':
+                  setState(() => _showHidden = !_showHidden);
+                  _reload();
+                case 'lock':
+                  vaults.lock(root!);
+                  await TempFiles.clearViewCache();
+                case 'unlock':
+                  await _unlock(root!);
+                case 'remove':
+                  await _removeVault(root!);
+                case 'refresh':
+                  _reload();
+              }
+            },
+            itemBuilder: (_) => [
+              if (!_vaultLocked)
+                const PopupMenuItem(value: 'folder', child: Text('Nieuwe map')),
+              CheckedPopupMenuItem(
+                  value: 'hidden',
+                  checked: _showHidden,
+                  child: const Text('Verborgen bestanden')),
+              const PopupMenuItem(value: 'refresh', child: Text('Vernieuwen')),
+              if (root != null && !_vaultLocked) ...[
+                const PopupMenuItem(
+                    value: 'lock', child: Text('Kluis vergrendelen')),
+                const PopupMenuItem(
+                    value: 'remove', child: Text('Versleuteling opheffen')),
+              ],
+              if (root != null && _vaultLocked)
+                const PopupMenuItem(
+                    value: 'unlock', child: Text('Kluis ontgrendelen')),
+            ],
+          ),
+      ],
+    );
+  }
+
+  String _rootLabel(String dir) {
+    for (final r in _roots) {
+      if (p.equals(r.path, dir)) return r.name;
+    }
+    return p.basename(dir);
+  }
+
+  Widget _body() {
+    if (!_permission) {
+      return _Message(
+        icon: Icons.folder_off_outlined,
+        text: 'Bestandskluis heeft toegang tot alle bestanden nodig om je '
+            'opslag te kunnen beheren.',
+        action: FilledButton(
+            onPressed: _init, child: const Text('Toegang verlenen')),
+      );
+    }
+    if (_dir == null) return _rootsView();
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_error != null) {
+      return _Message(icon: Icons.error_outline, text: _error!);
+    }
+    if (_vaultLocked) {
+      return _Message(
+        icon: Icons.lock,
+        text: 'Deze kluis is vergrendeld.',
+        action: FilledButton.icon(
+            onPressed: () => _unlock(_vaultRoot!),
+            icon: const Icon(Icons.lock_open),
+            label: const Text('Ontgrendelen')),
+      );
+    }
+    final list = _items.isEmpty
+        ? const _Message(icon: Icons.folder_open, text: 'Deze map is leeg')
+        : RefreshIndicator(
+            onRefresh: () => _open(_dir, keepSelection: true),
+            child: _grid ? _gridView() : _listView(),
+          );
+    return Column(children: [
+      if (_plainInVault > 0)
+        MaterialBanner(
+          leading: const Icon(Icons.warning_amber),
+          content: Text(
+              '$_plainInVault bestand(en) in deze map zijn nog niet versleuteld.'),
+          actions: [
+            TextButton(
+                onPressed: _encryptPlain, child: const Text('Versleutelen')),
+          ],
+        ),
+      Expanded(child: list),
+    ]);
+  }
+
+  Widget _rootsView() {
+    final quick = <(String, IconData, String)>[];
+    if (_roots.isNotEmpty) {
+      final base = _roots.first.path;
+      for (final (name, icon, sub) in [
+        ('Downloads', Icons.download, 'Download'),
+        ('Camera', Icons.photo_camera, 'DCIM'),
+        ('Afbeeldingen', Icons.image, 'Pictures'),
+        ('Video\'s', Icons.movie, 'Movies'),
+        ('Documenten', Icons.description, 'Documents'),
+      ]) {
+        final path = p.join(base, sub);
+        if (Directory(path).existsSync()) quick.add((name, icon, path));
+      }
+    }
+    final unlocked = vaults.unlockedVaults.toList();
+    return ListView(children: [
+      for (final r in _roots)
+        ListTile(
+          leading: const Icon(Icons.smartphone),
+          title: Text(r.name),
+          subtitle: Text(r.path),
+          onTap: () => _open(r.path),
+        ),
+      if (quick.isNotEmpty) const Divider(),
+      for (final (name, icon, path) in quick)
+        ListTile(
+            leading: Icon(icon), title: Text(name), onTap: () => _open(path)),
+      if (unlocked.isNotEmpty) ...[
+        const Divider(),
+        const ListTile(dense: true, title: Text('Ontgrendelde kluizen')),
+        for (final v in unlocked)
+          ListTile(
+            leading: const Icon(Icons.lock_open),
+            title: Text(p.basename(v)),
+            subtitle: Text(v),
+            onTap: () => _open(v),
+            trailing: IconButton(
+              tooltip: 'Vergrendelen',
+              icon: const Icon(Icons.lock),
+              onPressed: () {
+                vaults.lock(v);
+                TempFiles.clearViewCache();
+              },
+            ),
+          ),
+      ],
+    ]);
+  }
+
+  Widget _leading(FsItem i, {double size = 40}) {
+    if (i.isDir) {
+      return Icon(
+          i.isVault
+              ? (vaults.isUnlocked(i.path) ? Icons.lock_open : Icons.lock)
+              : Icons.folder,
+          size: size * 0.8,
+          color: i.isVault
+              ? Theme.of(context).colorScheme.tertiary
+              : Theme.of(context).colorScheme.primary);
+    }
+    final kind = kindOf(i.name);
+    if (kind == FileKind.image && !i.encrypted) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Image.file(i.entity as File,
+            width: size,
+            height: size,
+            fit: BoxFit.cover,
+            cacheWidth: (size * 3).round(),
+            errorBuilder: (_, _, _) => Icon(iconFor(kind), size: size * 0.8)),
+      );
+    }
+    if (kind == FileKind.image && i.encrypted && _grid) {
+      return _EncryptedThumb(file: i.entity as File, size: size);
+    }
+    return Stack(clipBehavior: Clip.none, children: [
+      Icon(iconFor(kind), size: size * 0.8),
+      if (i.encrypted)
+        const Positioned(
+            right: -4, bottom: -4, child: Icon(Icons.lock, size: 14)),
+    ]);
+  }
+
+  Widget? _trailing(FsItem i) {
+    if (_selecting) {
+      return Checkbox(
+          value: _selected.contains(i.path), onChanged: (_) => _toggle(i));
+    }
+    if (widget.pickFileMode) return null;
+    final inVault = _inVault;
+    return PopupMenuButton<String>(
+      onSelected: (a) => _itemMenu(i, a),
+      itemBuilder: (_) => [
+        if (!i.isDir) const PopupMenuItem(value: 'share', child: Text('Delen')),
+        const PopupMenuItem(value: 'rename', child: Text('Hernoemen')),
+        const PopupMenuItem(value: 'copy', child: Text('Kopiëren')),
+        const PopupMenuItem(value: 'move', child: Text('Knippen')),
+        if (i.isDir && !i.isVault && !inVault)
+          const PopupMenuItem(value: 'encrypt', child: Text('Map versleutelen')),
+        if (i.isVault && vaults.isUnlocked(i.path))
+          const PopupMenuItem(value: 'lock', child: Text('Vergrendelen')),
+        if (i.isVault)
+          const PopupMenuItem(
+              value: 'decrypt', child: Text('Versleuteling opheffen')),
+        const PopupMenuItem(value: 'details', child: Text('Details')),
+        const PopupMenuItem(value: 'delete', child: Text('Verwijderen')),
+      ],
+    );
+  }
+
+  Widget _listView() => ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        itemCount: _items.length,
+        itemBuilder: (context, n) {
+          final i = _items[n];
+          return ListTile(
+            selected: _selected.contains(i.path),
+            leading: SizedBox(width: 40, height: 40, child: Center(child: _leading(i))),
+            title: Text(i.name, overflow: TextOverflow.ellipsis),
+            subtitle: Text(i.isDir
+                ? formatDate(i.modified)
+                : '${formatSize(i.size)} · ${formatDate(i.modified)}'),
+            trailing: _trailing(i),
+            onTap: () => _tap(i),
+            onLongPress: widget.pickFileMode ? null : () => _toggle(i),
+          );
+        },
+      );
+
+  Widget _gridView() => GridView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(4),
+        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 130, mainAxisSpacing: 4, crossAxisSpacing: 4),
+        itemCount: _items.length,
+        itemBuilder: (context, n) {
+          final i = _items[n];
+          final selected = _selected.contains(i.path);
+          return InkWell(
+            onTap: () => _tap(i),
+            onLongPress: widget.pickFileMode ? null : () => _toggle(i),
+            child: Container(
+              decoration: BoxDecoration(
+                color: selected
+                    ? Theme.of(context).colorScheme.primaryContainer
+                    : Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Stack(fit: StackFit.expand, children: [
+                Center(child: _leading(i, size: 130)),
+                if (!i.isDir && kindOf(i.name) == FileKind.video)
+                  const Center(
+                      child: Icon(Icons.play_circle, color: Colors.white70, size: 36)),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    color: Colors.black45,
+                    padding: const EdgeInsets.all(4),
+                    child: Text(i.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: Colors.white, fontSize: 12)),
+                  ),
+                ),
+                if (selected)
+                  const Positioned(
+                      top: 4, right: 4, child: Icon(Icons.check_circle)),
+              ]),
+            ),
+          );
+        },
+      );
+}
+
+/// Miniatuur van een versleutelde foto (tijdelijk ontsleuteld in de cache).
+class _EncryptedThumb extends StatefulWidget {
+  const _EncryptedThumb({required this.file, required this.size});
+  final File file;
+  final double size;
+  @override
+  State<_EncryptedThumb> createState() => _EncryptedThumbState();
+}
+
+class _EncryptedThumbState extends State<_EncryptedThumb> {
+  late final Future<File> _plain =
+      TempFiles.plainFor(widget.file, services.ops.keyForFile(widget.file));
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<File>(
+        future: _plain,
+        builder: (_, s) => s.hasData
+            ? Image.file(s.data!,
+                width: widget.size,
+                height: widget.size,
+                fit: BoxFit.cover,
+                cacheWidth: (widget.size * 2).round(),
+                errorBuilder: (_, _, _) => const Icon(Icons.broken_image))
+            : const Icon(Icons.lock, size: 32),
+      );
+}
+
+class _Message extends StatelessWidget {
+  const _Message({required this.icon, required this.text, this.action});
+  final IconData icon;
+  final String text;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 56, color: Theme.of(context).colorScheme.outline),
+            const SizedBox(height: 12),
+            Text(text, textAlign: TextAlign.center),
+            if (action != null) ...[const SizedBox(height: 16), action!],
+          ]),
+        ),
+      );
+}
