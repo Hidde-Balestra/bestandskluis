@@ -188,6 +188,24 @@ class VaultCrypto {
   static Future<SecretKey> _fileKey(SecretKey master, List<int> salt) =>
       _hkdf.deriveKey(secretKey: master, nonce: salt, info: _hkdfInfo);
 
+  /// Kop en bestandssleutel van een versleuteld bestand, voor code die de
+  /// blokken zelf ontsleutelt (video-miniaturen in Android).
+  static Future<({Uint8List header, List<int> fileKey})> openForBlocks(
+      File file, SecretKey master) async {
+    final raf = await file.open();
+    try {
+      final header = await raf.read(headerLength);
+      if (header.length != headerLength ||
+          !List.generate(4, (i) => header[i] == magic[i]).every((b) => b)) {
+        throw const VaultFormatException('Geen kluisbestand');
+      }
+      final key = await _fileKey(master, header.sublist(8, 24));
+      return (header: header, fileKey: await key.extractBytes());
+    } finally {
+      await raf.close();
+    }
+  }
+
   static Uint8List _header(int chunkSize, Uint8List salt) {
     final h = Uint8List(headerLength);
     h.setRange(0, 4, magic);

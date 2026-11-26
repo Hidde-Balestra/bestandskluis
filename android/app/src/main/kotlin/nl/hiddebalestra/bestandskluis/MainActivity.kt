@@ -42,6 +42,11 @@ class MainActivity : FlutterFragmentActivity() {
                     stopService(Intent(this, FtpService::class.java))
                     result.success(null)
                 }
+                "videoMiniatuur" -> {
+                    val args = call.arguments as? Map<*, *>
+                    if (args == null) result.success(null)
+                    else VideoThumbs.make(args) { result.success(it) }
+                }
                 "naarAchtergrond" -> {
                     moveTaskToBack(true)
                     result.success(null)

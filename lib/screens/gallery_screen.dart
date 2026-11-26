@@ -105,6 +105,9 @@ class _GalleryScreenState extends State<GalleryScreen> {
     if (mounted) setState(() => _selected.addAll(_assets.map((a) => a.id)));
   }
 
+  void _selectAllVault() =>
+      setState(() => _selected.addAll(_vaultFiles.map((f) => f.path)));
+
   Future<void> _loadVaultMedia() async {
     final files = <File>[];
     for (final root in services.vaults.unlockedVaults) {
@@ -124,12 +127,19 @@ class _GalleryScreenState extends State<GalleryScreen> {
       }
     }
     files.sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
-    if (mounted) setState(() => _vaultFiles = files);
+    if (!mounted) return;
+    setState(() {
+      _vaultFiles = files;
+      if (_vaultMode) {
+        final paths = files.map((f) => f.path).toSet();
+        _selected.removeWhere((id) => !paths.contains(id));
+      }
+    });
   }
 
   // --- Openen ---------------------------------------------------------------
 
-  void _openAsset(int index) {
+  Future<void> _openAsset(int index) async {
     final items = _assets
         .map((a) => MediaItem(
               name: a.title ?? 'Media',
@@ -146,15 +156,18 @@ class _GalleryScreenState extends State<GalleryScreen> {
                       .share(ShareParams(files: [XFile(f.path)]));
                 }
               },
+              delete: () async =>
+                  (await PhotoManager.editor.deleteWithIds([a.id])).isNotEmpty,
             ))
         .toList();
-    Navigator.push(
+    final deleted = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
             builder: (_) => MediaViewer(items: items, initialIndex: index)));
+    if (deleted == true && mounted) await _reset();
   }
 
-  void _openVaultFile(int index) {
+  Future<void> _openVaultFile(int index) async {
     final items = _vaultFiles.map((f) {
       final name = VaultCrypto.plainName(
           p.basename(f.path), services.ops.keyForFile(f));
@@ -164,13 +177,69 @@ class _GalleryScreenState extends State<GalleryScreen> {
         encrypted: true,
         load: () => TempFiles.plainFor(f, services.ops.keyForFile(f)),
         share: () => TempFiles.share([f], services.vaults).then((_) {}),
+        delete: () async {
+          await services.ops.delete([f]);
+          return true;
+        },
       );
     }).toList();
-    Navigator.push(
+    final deleted = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
             builder: (_) => MediaViewer(items: items, initialIndex: index)));
+    if (deleted == true && mounted) await _loadVaultMedia();
   }
+
+  // --- Verwijderen ----------------------------------------------------------
+
+  Future<void> _deleteSelected() async {
+    final n = _selected.length;
+    final ok = await confirmDialog(context,
+        title: 'Verwijderen',
+        message: _vaultMode
+            ? '$n versleuteld(e) item(s) permanent verwijderen?'
+            : '$n item(s) van het toestel verwijderen?',
+        confirm: 'Verwijderen',
+        destructive: true);
+    if (!ok || !mounted) return;
+    if (_vaultMode) {
+      final files =
+          _vaultFiles.where((f) => _selected.contains(f.path)).toList();
+      await runWithProgress(
+          context, 'Verwijderen…', (_) => services.ops.delete(files));
+      setState(_selected.clear);
+      await _loadVaultMedia();
+    } else {
+      // Android 11+ vraagt hier zelf nog om bevestiging.
+      await PhotoManager.editor.deleteWithIds(_selected.toList());
+      await _reset();
+    }
+  }
+
+  Future<void> _shareSelected() async {
+    if (_vaultMode) {
+      final files =
+          _vaultFiles.where((f) => _selected.contains(f.path)).toList();
+      await TempFiles.share(files, services.vaults);
+      if (mounted) {
+        showMessage(context,
+            'Ontsleutelde kopie wordt over ${TempFiles.shareDelay.inMinutes} minuten verwijderd');
+      }
+      return;
+    }
+    final files = <XFile>[];
+    for (final a in _assets.where((a) => _selected.contains(a.id))) {
+      final f = await a.file;
+      if (f != null) files.add(XFile(f.path));
+    }
+    if (files.isNotEmpty) {
+      await SharePlus.instance.share(ShareParams(files: files));
+    }
+  }
+
+  void _toggle(String id) => setState(() {
+        if (!_selected.remove(id)) _selected.add(id);
+      });
 
   // --- Naar kluis verplaatsen -----------------------------------------------
 
@@ -226,6 +295,9 @@ class _GalleryScreenState extends State<GalleryScreen> {
   @override
   Widget build(BuildContext context) {
     final selecting = _selected.isNotEmpty;
+    final allSelected = _vaultMode
+        ? _selected.length >= _vaultFiles.length
+        : !_hasMore && _selected.length >= _assets.length;
     return Scaffold(
       appBar: selecting
           ? AppBar(
@@ -234,11 +306,11 @@ class _GalleryScreenState extends State<GalleryScreen> {
                   onPressed: () => setState(_selected.clear)),
               title: Text('${_selected.length} geselecteerd'),
               actions: [
-                if (_hasMore || _selected.length < _assets.length)
+                if (!allSelected)
                   IconButton(
                       tooltip: 'Alles selecteren',
                       icon: const Icon(Icons.select_all),
-                      onPressed: _selectAll)
+                      onPressed: _vaultMode ? _selectAllVault : _selectAll)
                 else
                   IconButton(
                       tooltip: 'Niets selecteren',
@@ -248,29 +320,32 @@ class _GalleryScreenState extends State<GalleryScreen> {
                   tooltip: 'Delen',
                   icon: const Icon(Icons.share),
                   onPressed: () async {
-                    final files = <XFile>[];
-                    for (final a in _assets.where((a) => _selected.contains(a.id))) {
-                      final f = await a.file;
-                      if (f != null) files.add(XFile(f.path));
-                    }
-                    if (files.isNotEmpty) {
-                      await SharePlus.instance.share(ShareParams(files: files));
+                    try {
+                      await _shareSelected();
+                    } catch (e) {
+                      if (mounted) showError(this.context, e);
                     }
                   },
                 ),
+                if (!_vaultMode)
+                  IconButton(
+                    tooltip: 'Naar kluis verplaatsen',
+                    icon: const Icon(Icons.enhanced_encryption),
+                    onPressed: _moveToVault,
+                  ),
                 IconButton(
-                  tooltip: 'Naar kluis verplaatsen',
-                  icon: const Icon(Icons.enhanced_encryption),
-                  onPressed: _moveToVault,
+                  tooltip: 'Verwijderen',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: _deleteSelected,
                 ),
               ],
             )
           : AppBar(title: const Text('Galerij'), actions: [
-              if (!_vaultMode && _assets.isNotEmpty)
+              if (_vaultMode ? _vaultFiles.isNotEmpty : _assets.isNotEmpty)
                 IconButton(
                     tooltip: 'Alles selecteren',
                     icon: const Icon(Icons.select_all),
-                    onPressed: _selectAll),
+                    onPressed: _vaultMode ? _selectAllVault : _selectAll),
             ]),
       body: Column(children: [
         if (!selecting) _albumBar(),
@@ -293,7 +368,10 @@ class _GalleryScreenState extends State<GalleryScreen> {
               label: const Text('Kluizen'),
               selected: _vaultMode,
               onSelected: (_) {
-                setState(() => _vaultMode = true);
+                setState(() {
+                  _vaultMode = true;
+                  _selected.clear();
+                });
                 _loadVaultMedia();
               },
             ),
@@ -356,18 +434,9 @@ class _GalleryScreenState extends State<GalleryScreen> {
             final a = _assets[i];
             final selected = _selected.contains(a.id);
             return GestureDetector(
-              onTap: () {
-                if (_selected.isNotEmpty) {
-                  setState(() {
-                    if (!_selected.remove(a.id)) _selected.add(a.id);
-                  });
-                } else {
-                  _openAsset(i);
-                }
-              },
-              onLongPress: () => setState(() {
-                if (!_selected.remove(a.id)) _selected.add(a.id);
-              }),
+              onTap: () =>
+                  _selected.isNotEmpty ? _toggle(a.id) : _openAsset(i),
+              onLongPress: () => _toggle(a.id),
               child: Stack(fit: StackFit.expand, children: [
                 _AssetThumb(asset: a),
                 if (a.type == AssetType.video)
@@ -421,13 +490,21 @@ class _GalleryScreenState extends State<GalleryScreen> {
         final video = kindOf(VaultCrypto.plainName(
                 p.basename(f.path), services.ops.keyForFile(f))) ==
             FileKind.video;
+        final selected = _selected.contains(f.path);
         return GestureDetector(
-          onTap: () => _openVaultFile(i),
+          onTap: () =>
+              _selected.isNotEmpty ? _toggle(f.path) : _openVaultFile(i),
+          onLongPress: () => _toggle(f.path),
           child: Container(
             color: Theme.of(context).colorScheme.surfaceContainerHighest,
-            child: video
-                ? const Icon(Icons.movie, size: 40)
-                : EncryptedThumb(file: f),
+            child: Stack(fit: StackFit.expand, children: [
+              EncryptedThumb(key: ValueKey(f.path), file: f, video: video),
+              if (selected) ...[
+                Container(color: Colors.black38),
+                const Center(
+                    child: Icon(Icons.check_circle, color: Colors.white)),
+              ],
+            ]),
           ),
         );
       },

@@ -82,6 +82,28 @@ class SystemBridge {
 
   static Future<void> stopServerService() => _call('stopServerDienst');
 
+  /// Miniatuur (JPEG) en duur (ms) van een video. Met [fileKey] en
+  /// [header] wordt een versleuteld kluisbestand in het geheugen gelezen.
+  static Future<({Uint8List jpg, int durationMs})?> videoThumbnail(
+      String path, int width,
+      {List<int>? fileKey, List<int>? header}) async {
+    try {
+      final r = await _ch.invokeMethod<Map<Object?, Object?>>('videoMiniatuur', {
+        'pad': path,
+        'breedte': width,
+        if (fileKey != null) 'sleutel': Uint8List.fromList(fileKey),
+        if (header != null) 'kop': Uint8List.fromList(header),
+      });
+      final jpg = r?['jpg'];
+      if (jpg is! Uint8List) return null;
+      return (jpg: jpg, durationMs: (r?['duur'] as num?)?.toInt() ?? 0);
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
   /// App naar de achtergrond in plaats van afsluiten.
   static Future<void> moveToBack() => _call('naarAchtergrond');
 }

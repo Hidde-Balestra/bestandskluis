@@ -356,6 +356,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
       encrypted: i.encrypted,
       load: () => TempFiles.plainFor(f, services.ops.keyForFile(f)),
       share: () => TempFiles.share([f], vaults).then((_) {}),
+      delete: () async {
+        await services.ops.delete([f]);
+        return true;
+      },
     );
   }
 
@@ -386,12 +390,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
     if (isMedia(item.name)) {
       final media = _items.where((i) => !i.isDir && isMedia(i.name)).toList();
-      await Navigator.push(
+      final deleted = await Navigator.push<bool>(
           context,
           MaterialPageRoute(
               builder: (_) => MediaViewer(
                   items: media.map(_mediaItem).toList(),
                   initialIndex: media.indexOf(item))));
+      if (deleted == true) _reload();
       return;
     }
     final plain = await runWithProgress(
@@ -999,11 +1004,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
       return;
     }
     if (isMedia(item.name)) {
-      await Navigator.push(
+      final deleted = await Navigator.push<bool>(
           context,
           MaterialPageRoute(
               builder: (_) =>
                   MediaViewer(items: [_mediaItem(item)], initialIndex: 0)));
+      if (deleted == true) {
+        _reload();
+        await _search(_searchCtl.text);
+      }
       return;
     }
     final plain = await runWithProgress(
@@ -1196,8 +1205,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
             errorBuilder: (_, _, _) => Icon(iconFor(kind), size: size * 0.8)),
       );
     }
-    if (kind == FileKind.image && i.encrypted) {
-      return EncryptedThumb(file: i.entity as File, size: size);
+    if ((kind == FileKind.image || kind == FileKind.video) && i.encrypted) {
+      return EncryptedThumb(
+          file: i.entity as File,
+          size: size,
+          video: kind == FileKind.video);
     }
     return Stack(clipBehavior: Clip.none, children: [
       Icon(iconFor(kind), size: size * 0.8),

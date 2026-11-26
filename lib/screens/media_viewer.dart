@@ -14,6 +14,7 @@ class MediaItem {
       required this.isVideo,
       required this.load,
       this.share,
+      this.delete,
       this.encrypted = false});
 
   final String name;
@@ -21,6 +22,10 @@ class MediaItem {
   final bool encrypted;
   final Future<File> Function() load;
   final Future<void> Function()? share;
+
+  /// Verwijdert het item (na bevestiging in de viewer); false = niet
+  /// verwijderd (bijv. geannuleerd in de Android-dialoog).
+  final Future<bool> Function()? delete;
 }
 
 class MediaViewer extends StatefulWidget {
@@ -37,7 +42,9 @@ class _MediaViewerState extends State<MediaViewer> {
   late final PageController _pages =
       PageController(initialPage: widget.initialIndex);
   late int _index = widget.initialIndex;
+  late final List<MediaItem> _items = List.of(widget.items);
   bool _chrome = true;
+  bool _deleted = false;
 
   @override
   void dispose() {
@@ -45,9 +52,45 @@ class _MediaViewerState extends State<MediaViewer> {
     super.dispose();
   }
 
+  Future<void> _delete(MediaItem item) async {
+    final ok = await confirmDialog(context,
+        title: 'Verwijderen',
+        message: '"${item.name}" permanent verwijderen?',
+        confirm: 'Verwijderen',
+        destructive: true);
+    if (!ok || !mounted) return;
+    try {
+      if (!await item.delete!()) return;
+    } catch (e) {
+      if (mounted) showError(context, e);
+      return;
+    }
+    if (!mounted) return;
+    _deleted = true;
+    if (_items.length == 1) {
+      Navigator.pop(context, true);
+      return;
+    }
+    setState(() {
+      _items.removeAt(_index);
+      if (_index >= _items.length) _index = _items.length - 1;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    final item = widget.items[_index];
+    final item = _items[_index];
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        // Teruggeven of er iets is verwijderd, zodat de lijst ververst.
+        if (!didPop) Navigator.pop(context, _deleted);
+      },
+      child: _scaffold(item),
+    );
+  }
+
+  Widget _scaffold(MediaItem item) {
     return Scaffold(
       backgroundColor: Colors.black,
       extendBodyBehindAppBar: true,
@@ -72,22 +115,28 @@ class _MediaViewerState extends State<MediaViewer> {
                       try {
                         await item.share!();
                       } catch (e) {
-                        if (context.mounted) showError(context, e);
+                        if (mounted) showError(context, e);
                       }
                     },
+                  ),
+                if (item.delete != null)
+                  IconButton(
+                    tooltip: 'Verwijderen',
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () => _delete(item),
                   ),
               ],
             )
           : null,
       body: PageView.builder(
         controller: _pages,
-        itemCount: widget.items.length,
+        itemCount: _items.length,
         onPageChanged: (i) => setState(() => _index = i),
         itemBuilder: (context, i) => GestureDetector(
           onTap: () => setState(() => _chrome = !_chrome),
           child: _MediaPage(
-              key: ValueKey(widget.items[i]),
-              item: widget.items[i],
+              key: ValueKey(_items[i]),
+              item: _items[i],
               active: i == _index),
         ),
       ),
