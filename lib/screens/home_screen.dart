@@ -6,7 +6,10 @@ import '../app_services.dart';
 import '../services/camera_mover.dart';
 import '../services/system_bridge.dart';
 import '../services/temp_files.dart';
+import '../services/media_server.dart';
 import '../services/thumbnails.dart';
+import '../services/vault_meta.dart';
+import '../widgets/vault_unlock.dart';
 import 'browser_screen.dart';
 import 'ftp_screen.dart';
 import 'gallery_screen.dart';
@@ -25,6 +28,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final Set<int> _visited = {0};
   DateTime? _pausedAt;
   StreamSubscription<Incoming>? _incoming;
+  StreamSubscription<String>? _lockSub;
+  (bool, bool)? _triggers;
   bool? _secure;
   Set<String> _unlocked = {};
 
@@ -33,10 +38,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     services.vaults.addListener(_onVaults);
-    services.settings.addListener(_updateSecureScreen);
+    services.settings.addListener(_onSettings);
     _incoming = SystemBridge.incoming.listen(_handle);
+    _lockSub = SystemBridge.lockRequests.listen(_lockAll);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      _updateSecureScreen();
+      _onSettings();
       final first = await SystemBridge.initial();
       if (first != null) _handle(first);
     });
@@ -46,8 +52,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     services.vaults.removeListener(_onVaults);
-    services.settings.removeListener(_updateSecureScreen);
+    services.settings.removeListener(_onSettings);
     _incoming?.cancel();
+    _lockSub?.cancel();
     super.dispose();
   }
 
@@ -55,10 +62,52 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _updateSecureScreen();
     // Net ontgrendeld: kijken of er camerafoto's naar die kluis moeten.
     final now = services.vaults.unlockedVaults.toSet();
-    if (now.difference(_unlocked).isNotEmpty) _moveCameraPhotos();
+    final opened = now.difference(_unlocked);
+    if (opened.isNotEmpty) {
+      _moveCameraPhotos();
+      // Favorieten en albums alvast laden.
+      for (final r in opened) {
+        services.meta.load(r).catchError((_) => VaultMeta());
+      }
+    }
     // Vergrendeld: miniaturen uit het geheugen halen.
-    if (_unlocked.difference(now).isNotEmpty) Thumbnails.clear();
+    if (_unlocked.difference(now).isNotEmpty) {
+      Thumbnails.clear();
+      MediaServer.instance.revokeAll();
+    }
     _unlocked = now;
+  }
+
+  void _onSettings() {
+    _updateSecureScreen();
+    final s = services.settings;
+    TempFiles.stripMetadata = s.stripMetadata;
+    final t = (s.lockOnScreenOff, s.lockOnFaceDown);
+    if (t != _triggers) {
+      _triggers = t;
+      SystemBridge.setLockTriggers(screenOff: t.$1, faceDown: t.$2);
+    }
+  }
+
+  /// Widget, scherm uit of telefoon omgedraaid.
+  void _lockAll(String reason) {
+    if (services.vaults.unlockedVaults.isEmpty) return;
+    services.vaults.lockAll();
+    TempFiles.clearViewCache();
+    MediaServer.instance.revokeAll();
+  }
+
+  /// "Kluis openen" in de widget: laatst gebruikte kluis ontgrendelen.
+  Future<void> _openVault() async {
+    final known = services.known.paths;
+    if (known.isEmpty) return;
+    final last = services.settings.lastVault;
+    final root = last != null && known.contains(last) ? last : known.first;
+    setState(() => _tab = 0);
+    if (!services.vaults.isUnlocked(root) && !await unlockVault(context, root)) {
+      return;
+    }
+    BrowserScreen.openRequest.value = root;
   }
 
   /// Schermafbeeldingen blokkeren zolang er een kluis open is.
@@ -98,6 +147,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         await openFtpLink(context, url);
       case StopFtp():
         await services.ftp.stop();
+      case OpenVault():
+        await _openVault();
     }
   }
 

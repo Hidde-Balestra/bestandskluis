@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:workmanager/workmanager.dart';
@@ -26,6 +28,11 @@ Future<void> main() async {
     if (!services.vaults.isVaultRoot(root)) await services.biometric.removeKey(root);
   }
   await services.backup.load();
+  TempFiles.stripMetadata = services.settings.stripMetadata;
+  // Prullenbak: items ouder dan 30 dagen opruimen (op de achtergrond).
+  unawaited(services.trash
+      .purgeExpired(services.known.paths)
+      .catchError((_) => 0));
   SystemBridge.init();
   try {
     await Workmanager().initialize(backupDispatcher);

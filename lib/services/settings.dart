@@ -10,6 +10,11 @@ class AppSettings extends ChangeNotifier {
   static const _cameraVaultKey = 'instellingen.cameraNaarKluis';
   static const _cameraSinceKey = 'instellingen.cameraSinds';
   static const _sortKey = 'instellingen.sorteren';
+  static const _stripKey = 'instellingen.exifVerwijderen';
+  static const _screenOffKey = 'instellingen.vergrendelSchermUit';
+  static const _faceDownKey = 'instellingen.vergrendelOmgedraaid';
+  static const _lastVaultKey = 'instellingen.laatsteKluis';
+  static const _slideKey = 'instellingen.diavoorstellingSeconden';
 
   /// Keuzes voor automatisch vergrendelen; 0 = nooit.
   static const autoLockChoices = [1, 5, 15, 30, 0];
@@ -22,6 +27,26 @@ class AppSettings extends ChangeNotifier {
   String? _cameraVault;
   DateTime? _cameraSince;
   String _sort = 'naam';
+  bool _stripMetadata = true;
+  bool _lockOnScreenOff = false;
+  bool _lockOnFaceDown = false;
+  String? _lastVault;
+  int _slideSeconds = 4;
+
+  /// Locatie en EXIF uit foto's halen bij delen.
+  bool get stripMetadata => _stripMetadata;
+
+  /// Kluizen vergrendelen zodra het scherm uitgaat.
+  bool get lockOnScreenOff => _lockOnScreenOff;
+
+  /// Kluizen vergrendelen als de telefoon met het scherm naar beneden ligt.
+  bool get lockOnFaceDown => _lockOnFaceDown;
+
+  /// Laatst ontgrendelde kluis (voor de widget).
+  String? get lastVault => _lastVault;
+
+  /// Seconden per foto in de diavoorstelling.
+  int get slideSeconds => _slideSeconds;
 
   /// Kluizen met vingerafdruk ontgrendelen.
   bool get biometric => _biometric;
@@ -57,6 +82,11 @@ class AppSettings extends ChangeNotifier {
     _cameraSince =
         since == null ? null : DateTime.fromMillisecondsSinceEpoch(since);
     _sort = _prefs.getString(_sortKey) ?? 'naam';
+    _stripMetadata = _prefs.getBool(_stripKey) ?? true;
+    _lockOnScreenOff = _prefs.getBool(_screenOffKey) ?? false;
+    _lockOnFaceDown = _prefs.getBool(_faceDownKey) ?? false;
+    _lastVault = _prefs.getString(_lastVaultKey);
+    _slideSeconds = _prefs.getInt(_slideKey) ?? 4;
     notifyListeners();
   }
 
@@ -107,5 +137,35 @@ class AppSettings extends ChangeNotifier {
     _sort = value;
     notifyListeners();
     await _prefs.setString(_sortKey, value);
+  }
+
+  Future<void> setStripMetadata(bool v) async {
+    _stripMetadata = v;
+    notifyListeners();
+    await _prefs.setBool(_stripKey, v);
+  }
+
+  Future<void> setLockOnScreenOff(bool v) async {
+    _lockOnScreenOff = v;
+    notifyListeners();
+    await _prefs.setBool(_screenOffKey, v);
+  }
+
+  Future<void> setLockOnFaceDown(bool v) async {
+    _lockOnFaceDown = v;
+    notifyListeners();
+    await _prefs.setBool(_faceDownKey, v);
+  }
+
+  Future<void> setLastVault(String root) async {
+    if (_lastVault == root) return;
+    _lastVault = root;
+    await _prefs.setString(_lastVaultKey, root);
+  }
+
+  Future<void> setSlideSeconds(int v) async {
+    _slideSeconds = v;
+    notifyListeners();
+    await _prefs.setInt(_slideKey, v);
   }
 }

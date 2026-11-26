@@ -1,6 +1,13 @@
 package nl.hiddebalestra.bestandskluis
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -13,16 +20,35 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 // FlutterFragmentActivity is nodig voor de vingerafdrukprompt.
-class MainActivity : FlutterFragmentActivity() {
+class MainActivity : FlutterFragmentActivity(), SensorEventListener {
     private var channel: MethodChannel? = null
     private val main = Handler(Looper.getMainLooper())
+
+    // Automatisch vergrendelen (instellingen uit Dart).
+    private var lockOnScreenOff = false
+    private var lockOnFaceDown = false
+    private var faceDownSince = 0L
+    private var screenReceiver: BroadcastReceiver? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         channel = ch
+        active = ch
         ch.setMethodCallHandler { call, result ->
             when (call.method) {
+                "vergrendelInstellingen" -> {
+                    val a = call.arguments as? Map<*, *>
+                    lockOnScreenOff = a?.get("schermUit") == true
+                    lockOnFaceDown = a?.get("omdraaien") == true
+                    updateScreenReceiver()
+                    updateSensor()
+                    result.success(null)
+                }
+                "widgetBijwerken" -> {
+                    VaultWidget.refresh(this)
+                    result.success(null)
+                }
                 // Schermafbeeldingen blokkeren en inhoud verbergen in "recente apps".
                 "beveiligScherm" -> {
                     if (call.arguments == true) {
@@ -58,6 +84,89 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
+    // --- Vergrendelen bij scherm uit / omdraaien ----------------------------
+
+    private fun updateScreenReceiver() {
+        if (lockOnScreenOff && screenReceiver == null) {
+            val r = object : BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) {
+                    if (i.action == Intent.ACTION_SCREEN_OFF) lockAll("scherm")
+                }
+            }
+            val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(r, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(r, filter)
+            }
+            screenReceiver = r
+        } else if (!lockOnScreenOff && screenReceiver != null) {
+            try {
+                unregisterReceiver(screenReceiver)
+            } catch (_: Exception) {
+            }
+            screenReceiver = null
+        }
+    }
+
+    private fun sensors() = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+
+    private fun updateSensor() {
+        val sm = sensors()
+        sm.unregisterListener(this)
+        faceDownSince = 0L
+        if (lockOnFaceDown && hasWindowFocus()) {
+            sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+                sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (lockOnFaceDown) {
+            sensors().getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+                sensors().registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+            }
+        }
+    }
+
+    override fun onPause() {
+        sensors().unregisterListener(this)
+        faceDownSince = 0L
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        screenReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (_: Exception) {
+            }
+        }
+        screenReceiver = null
+        if (active == channel) active = null
+        super.onDestroy()
+    }
+
+    // Scherm naar beneden (z ≈ -9,8 m/s²) gedurende 0,8 s: vergrendelen.
+    override fun onSensorChanged(e: SensorEvent) {
+        val z = e.values[2]
+        val now = System.currentTimeMillis()
+        if (z < -8.5f) {
+            if (faceDownSince == 0L) {
+                faceDownSince = now
+            } else if (now - faceDownSince > 800) {
+                faceDownSince = Long.MAX_VALUE / 2 // één keer per keer omdraaien
+                lockAll("omgedraaid")
+            }
+        } else if (z > -6f) {
+            faceDownSince = 0L
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -75,6 +184,7 @@ class MainActivity : FlutterFragmentActivity() {
         intent.putExtra(HANDLED, true)
         when (intent.action) {
             ACTION_STOP_FTP -> done(mapOf("soort" to "stopFtp"))
+            VaultWidget.ACTION_OPEN_VAULT -> done(mapOf("soort" to "openKluis"))
             Intent.ACTION_VIEW -> {
                 val uri = intent.data
                 if (uri != null && (uri.scheme == "ftp" || uri.scheme == "ftps")) {
@@ -155,6 +265,16 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     companion object {
+        /** Kanaal van de draaiende app (voor de widget). */
+        @Volatile
+        var active: MethodChannel? = null
+
+        /** Alle kluizen vergrendelen in de draaiende app (als die draait). */
+        fun lockAll(reason: String) {
+            val ch = active ?: return
+            Handler(Looper.getMainLooper()).post { ch.invokeMethod("vergrendelAlles", reason) }
+        }
+
         const val CHANNEL = "bestandskluis/systeem"
         const val ACTION_STOP_FTP = "nl.hiddebalestra.bestandskluis.STOP_FTP"
         private const val HANDLED = "bestandskluis.verwerkt"

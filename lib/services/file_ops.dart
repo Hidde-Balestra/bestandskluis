@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 
 import '../crypto/vault_crypto.dart';
 import '../crypto/vault_manager.dart';
+import 'trash.dart';
 
 /// Kopiëren, verplaatsen en verwijderen, met automatische versleuteling
 /// bij het in of uit een kluis zetten.
@@ -12,6 +13,9 @@ class FileOps {
   FileOps(this.vaults);
 
   final VaultManager vaults;
+
+  /// Prullenbak (in de app altijd gezet; in tests soms niet).
+  Trash? trash;
 
   /// Kopieert of verplaatst [items] naar [destDir].
   ///
@@ -148,10 +152,18 @@ class FileOps {
     return e.rename(target);
   }
 
-  Future<void> delete(List<FileSystemEntity> items) async {
+  /// Verwijdert; met een [trash] gaat het naar de prullenbak (tenzij
+  /// [permanent]).
+  Future<void> delete(List<FileSystemEntity> items,
+      {bool permanent = false}) async {
     for (final e in items) {
       if (e is Directory && vaults.isVaultRoot(e.path)) vaults.lock(e.path);
-      await e.delete(recursive: true);
+      final t = trash;
+      if (t != null && !permanent) {
+        await t.moveToTrash(e);
+      } else {
+        await e.delete(recursive: true);
+      }
     }
   }
 

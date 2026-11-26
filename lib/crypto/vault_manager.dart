@@ -29,6 +29,9 @@ class VaultManager extends ChangeNotifier implements VaultAccess {
 
   static const markerName = '.bestandskluis';
 
+  /// Map van de prullenbak (zie Trash), ook binnen kluizen.
+  static const trashDirName = '.bestandskluis-prullenbak';
+
   /// PBKDF2-iteraties voor nieuwe kluizen.
   final int iterations;
 
@@ -250,6 +253,8 @@ class VaultManager extends ChangeNotifier implements VaultAccess {
       if (e is! File) continue;
       final name = p.basename(e.path);
       if (name == markerName || name.endsWith('.part')) continue;
+      // Prullenbak van de kluis (zie Trash): niet aanraken.
+      if (p.split(e.path).contains(trashDirName)) continue;
       if (test(name)) out.add(e);
     }
     return out;
@@ -286,6 +291,9 @@ class VaultManager extends ChangeNotifier implements VaultAccess {
       onProgress?.call(i, files.length, p.basename(f.path));
       await decryptInto(f, f.parent.path, key, deleteSource: true);
     }
+    // De prullenbak van de kluis is niet meer te ontsleutelen: weg ermee.
+    final trash = Directory(p.join(root, trashDirName));
+    if (await trash.exists()) await trash.delete(recursive: true);
     await File(p.join(root, markerName)).delete();
     _keys.remove(root);
     notifyListeners();

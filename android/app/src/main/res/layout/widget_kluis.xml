@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_achtergrond"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="8dp">
+
+    <ImageView
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:contentDescription="@null"
+        android:src="@mipmap/ic_launcher" />
+
+    <TextView
+        android:id="@+id/widget_vergrendel"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_marginStart="8dp"
+        android:layout_weight="1"
+        android:background="@drawable/widget_knop"
+        android:gravity="center"
+        android:text="Vergrendelen"
+        android:textColor="#FFFFFFFF"
+        android:textSize="14sp" />
+
+    <TextView
+        android:id="@+id/widget_open"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_marginStart="8dp"
+        android:layout_weight="1"
+        android:background="@drawable/widget_knop"
+        android:gravity="center"
+        android:text="Kluis openen"
+        android:textColor="#FFFFFFFF"
+        android:textSize="14sp" />
+</LinearLayout>

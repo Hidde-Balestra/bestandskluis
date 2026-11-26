@@ -67,6 +67,7 @@ class VaultBackup {
       final byDir = <String, List<File>>{};
       await for (final e in Directory(root).list(recursive: true, followLinks: false)) {
         if (e is! File || !_include(p.basename(e.path))) continue;
+        if (p.split(e.path).contains(VaultManager.trashDirName)) continue;
         final rel = p.relative(e.parent.path, from: root);
         final dir = rel == '.'
             ? remoteRoot
@@ -103,6 +104,71 @@ class VaultBackup {
       }
     }
     return result;
+  }
+}
+
+/// Een kluis terughalen van de back-upserver.
+class VaultRestore {
+  VaultRestore._();
+
+  /// Mappen (kluizen) in de back-upmap op de server.
+  static Future<List<String>> remoteVaults(FtpClient c, String remoteBase) async {
+    final base = remoteBase.startsWith('/') ? remoteBase : '/$remoteBase';
+    final list = await c.list(base);
+    return [
+      for (final e in list)
+        if (e.isDir && e.name != '.' && e.name != '..') e.name
+    ]..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  }
+
+  /// Downloadt [remoteVaultDir] naar een nieuwe map in [localParent] en
+  /// geeft het pad van de teruggezette kluis. De bestanden blijven
+  /// versleuteld; ontgrendelen gaat met het wachtwoord (of de herstelcode).
+  static Future<String> restore(
+      FtpClient c, String remoteVaultDir, String localParent,
+      {void Function(String name)? onFile}) async {
+    final name = p.posix.basename(remoteVaultDir);
+    final target = VaultManager.uniqueFile(localParent, name).path;
+
+    Future<void> walk(String remote, String local) async {
+      await Directory(local).create(recursive: true);
+      for (final e in await c.list(remote)) {
+        if (e.name == '.' || e.name == '..' || e.name.endsWith('.part')) {
+          continue;
+        }
+        if (e.isDir) {
+          if (e.name == VaultManager.trashDirName) continue;
+          await walk(p.posix.join(remote, e.name), p.join(local, e.name));
+        } else {
+          onFile?.call(e.name);
+          await c.download(
+              p.posix.join(remote, e.name), File(p.join(local, e.name)));
+        }
+      }
+    }
+
+    try {
+      await walk(remoteVaultDir, target);
+      // Een Bestandskluis-server toont het kluisbestand niet in de lijst:
+      // dan apart ophalen.
+      final marker = File(p.join(target, VaultManager.markerName));
+      if (!await marker.exists()) {
+        try {
+          await c.download(
+              p.posix.join(remoteVaultDir, VaultManager.markerName), marker);
+        } on FtpException {
+          // Ontbreekt.
+        }
+      }
+      if (!await marker.exists()) {
+        throw StateError('Dit is geen kluis-back-up (het kluisbestand ontbreekt)');
+      }
+      return target;
+    } catch (_) {
+      final d = Directory(target);
+      if (await d.exists()) await d.delete(recursive: true);
+      rethrow;
+    }
   }
 }
 
@@ -182,6 +248,22 @@ class BackupService extends ChangeNotifier {
     } catch (_) {
       // Planner niet beschikbaar; handmatig back-uppen blijft werken.
     }
+  }
+
+  /// Verbinden met de ingestelde back-upserver.
+  static Future<(FtpClient, String)> connectConfigured() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_kConn);
+    final conn = raw == null ? null : SavedConnection.decode(raw);
+    if (conn == null) throw StateError('Stel eerst een back-upserver in');
+    final password = await FtpController.savedPassword(conn) ?? '';
+    final client = await FtpClient.connect(conn.host,
+        port: conn.port,
+        user: conn.user.isEmpty ? 'anonymous' : conn.user,
+        password: conn.user.isEmpty ? 'gast@' : password,
+        tls: conn.tls,
+        pinnedFingerprint: conn.fingerprint);
+    return (client, prefs.getString(_kDir) ?? '/Bestandskluis-backup');
   }
 
   /// Back-up nu uitvoeren met de opgeslagen instellingen.

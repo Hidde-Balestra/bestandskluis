@@ -20,10 +20,17 @@ Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP(S)-s
 - **Zip**: inpakken en uitpakken, ook in en uit kluizen (met bescherming tegen "zip slip")
 - Meerdere items selecteren (lang indrukken) of **alles selecteren** met de knop bovenin
 - **Delen naar Bestandskluis**: in elke app *Delen → Bestandskluis* en het bestand gaat versleuteld een kluis in
+- **Prullenbak**: verwijderde bestanden blijven 30 dagen terug te zetten; items uit een kluis blijven daarbij versleuteld (in de kluis zelf)
+- **Notities**: tekstbestanden bekijken en bewerken in de app; in een kluis alleen in het geheugen ontsleuteld (*+ → Nieuwe notitie*)
+- **Duplicaten zoeken** (ook tussen kluis en gewone mappen, op inhoud) en **opslaganalyse** (grootste mappen en bestanden), via het menu van een map
 
 ### Galerij
 - Alle foto's en video's van het toestel per album
-- Viewer met zoomen, vegen en een videospeler
+- Viewer met zoomen, vegen, een videospeler en een **diavoorstelling**
+- **Video's in een kluis afspelen zonder kopie op schijf**: een lokale stream (127.0.0.1, geheime token per bestand) ontsleutelt alleen het gevraagde stuk
+- **Foto's bewerken**: draaien en bijsnijden, ook in een kluis (alles in het geheugen)
+- **Favorieten en albums** in kluizen (versleuteld opgeslagen in de kluis zelf)
+- **Verwijderen** in de viewer en bij een selectie; miniaturen van versleutelde video's met duur
 - Alles selecteren (hele album) om te delen of naar een kluis te verplaatsen
 - **Naar kluis verplaatsen**: selecteer foto's/video's, versleutel ze in een kluis en verwijder ze uit de galerij
 - **Nieuwe camerafoto's automatisch naar een kluis** (instelbaar): gebeurt zodra de app open is en die kluis ontgrendeld is
@@ -38,6 +45,9 @@ Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP(S)-s
 - **Mijn kluizen** op het startscherm: alle kluizen, ook vergrendelde
 - **Ontgrendelen met vingerafdruk**: de kluissleutel staat in een Android Keystore-sleutel die alleen na een vingerafdrukscan wordt vrijgegeven (Android 9+). Een nieuw toegevoegde vingerafdruk maakt die sleutel ongeldig; dan is één keer het wachtwoord nodig. Op Android 7/8 controleert de app de vingerafdruk.
 - **Schermbeveiliging**: zolang een kluis open is geen schermafbeeldingen en verborgen inhoud in "recente apps"
+- **Vergrendelen als het scherm uitgaat** of als je de telefoon **met het scherm naar beneden** legt (instelbaar)
+- **Widget** op het startscherm: *Vergrendelen* (alles op slot) en *Kluis openen* (laatst gebruikte kluis, met vingerafdruk)
+- **Locatie en EXIF verwijderen bij delen** (standaard aan): JPEG zonder opnieuw te comprimeren, PNG-tekstblokken weg
 - Automatisch vergrendelen na 1, 5 (standaard), 15 of 30 minuten op de achtergrond, of nooit
 - **Indringersfoto** (optioneel): na 3 verkeerde wachtwoorden maakt de voorcamera ongemerkt een foto, versleuteld bewaard. Bekijken kan alleen na vingerafdruk of schermvergrendeling.
 - **Delen = tijdelijk ontsleutelen**: bij delen wordt een ontsleutelde kopie in de cache van de app gemaakt. Die wordt na 10 minuten verwijderd, en in elk geval bij de volgende start van de app.
@@ -49,7 +59,7 @@ Android-app (Flutter) die een bestandsbeheerder, foto- en videogalerij, FTP(S)-s
 - **QR-code**: scan met een andere telefoon om meteen te verbinden. Met Bestandskluis op die telefoon wordt ook het certificaat gecontroleerd.
 - **Kluizen via FTP**: bestanden in *ontgrendelde* kluizen worden tijdens het downloaden ontsleuteld; uploads naar een kluis worden direct versleuteld. Vergrendelde kluizen geven alleen versleutelde bestanden.
 - **FTP-client** met FTPS: het servercertificaat wordt de eerste keer onthouden en daarna gecontroleerd (een gewijzigd certificaat wordt geweigerd)
-- **Back-up van kluizen naar je FTP-server**: handmatig of elke nacht automatisch (op wifi). Alleen de versleutelde bestanden gaan over de lijn, precies zoals ze op de telefoon staan. De kluis hoeft daarvoor niet open te zijn en de server ziet nooit iets onversleuteld. Alleen gewijzigde bestanden worden verstuurd.
+- **Back-up van kluizen naar je FTP-server**: handmatig of elke nacht automatisch (op wifi). Alleen de versleutelde bestanden gaan over de lijn, precies zoals ze op de telefoon staan. De kluis hoeft daarvoor niet open te zijn en de server ziet nooit iets onversleuteld. Alleen gewijzigde bestanden worden verstuurd. **Terugzetten** (bijv. op een nieuwe telefoon) kan met één knop bij *Instellingen*.
 
 ## Beveiliging
 

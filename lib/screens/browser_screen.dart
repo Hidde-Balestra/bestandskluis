@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path/path.dart' as p;
 
@@ -9,14 +10,18 @@ import '../app_services.dart';
 import '../crypto/vault_crypto.dart';
 import '../crypto/vault_manager.dart';
 import '../services/storage.dart';
+import '../services/memory_files.dart';
 import '../services/temp_files.dart';
 import '../util/format.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/dialogs.dart';
 import '../widgets/encrypted_thumb.dart';
+import '../widgets/media_items.dart';
 import '../widgets/vault_dialogs.dart';
 import '../widgets/vault_unlock.dart';
 import 'media_viewer.dart';
+import 'text_editor_screen.dart';
+import 'tools_screens.dart';
 
 class FsItem {
   FsItem(this.entity,
@@ -53,6 +58,9 @@ class BrowserScreen extends StatefulWidget {
   /// Als bestandskiezer: tikken op een bestand geeft het pad terug.
   final bool pickFileMode;
 
+  /// Verzoek van buitenaf (widget) om een map te openen.
+  static final openRequest = ValueNotifier<String?>(null);
+
   @override
   State<BrowserScreen> createState() => _BrowserScreenState();
 }
@@ -81,6 +89,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     super.initState();
     vaults.addListener(_reload);
     services.known.addListener(_reload);
+    if (!widget.pickFileMode) BrowserScreen.openRequest.addListener(_onOpenRequest);
     _init();
   }
 
@@ -88,6 +97,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   void dispose() {
     vaults.removeListener(_reload);
     services.known.removeListener(_reload);
+    BrowserScreen.openRequest.removeListener(_onOpenRequest);
     super.dispose();
   }
 
@@ -95,6 +105,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _permission = await Storage.ensurePermission();
     _roots = await Storage.roots();
     if (mounted) setState(() {});
+  }
+
+  void _onOpenRequest() {
+    final path = BrowserScreen.openRequest.value;
+    if (path == null) return;
+    BrowserScreen.openRequest.value = null;
+    _open(path);
   }
 
   void _reload() {
@@ -295,6 +312,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
               _newFolder();
             },
           ),
+          ListTile(
+            leading: const Icon(Icons.note_add_outlined),
+            title: const Text('Nieuwe notitie'),
+            subtitle: _inVault ? const Text('Versleuteld in deze kluis') : null,
+            onTap: () {
+              Navigator.pop(ctx);
+              _newNote();
+            },
+          ),
           if (!_inVault) ...[
             ListTile(
               leading: const Icon(Icons.enhanced_encryption_outlined),
@@ -348,20 +374,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   // --- Openen ---------------------------------------------------------------
 
-  MediaItem _mediaItem(FsItem i) {
-    final f = i.entity as File;
-    return MediaItem(
-      name: i.name,
-      isVideo: kindOf(i.name) == FileKind.video,
-      encrypted: i.encrypted,
-      load: () => TempFiles.plainFor(f, services.ops.keyForFile(f)),
-      share: () => TempFiles.share([f], vaults).then((_) {}),
-      delete: () async {
-        await services.ops.delete([f]);
-        return true;
-      },
-    );
-  }
+  MediaItem _mediaItem(FsItem i) =>
+      mediaItemForFile(i.entity as File, i.name, encrypted: i.encrypted);
 
   Future<void> _tap(FsItem item) async {
     if (_selecting) {
@@ -380,6 +394,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
       return;
     }
     final file = item.entity as File;
+    if (isTextFile(item.name)) {
+      await Navigator.push(
+          context,
+          MaterialPageRoute(
+              builder: (_) => TextEditorScreen(file: file, name: item.name)));
+      _reload();
+      return;
+    }
     if (item.name.toLowerCase().endsWith('.zip')) {
       final ok = await confirmDialog(context,
           title: item.name,
@@ -443,7 +465,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final names = items.length == 1 ? '"${items.first.name}"' : '${items.length} items';
     final ok = await confirmDialog(context,
         title: 'Verwijderen',
-        message: '$names permanent verwijderen?',
+        message: '$names naar de prullenbak verplaatsen? Je kunt het daar 30 dagen terugzetten.',
         confirm: 'Verwijderen',
         destructive: true);
     if (!ok || !mounted) return;
@@ -491,6 +513,39 @@ class _BrowserScreenState extends State<BrowserScreen> {
       await services.ops.transfer(items, dir, move: move, onItem: update);
     });
     if (move) services.clipboard = [];
+    _reload();
+  }
+
+  Future<void> _openTrash() async {
+    await Navigator.push(
+        context, MaterialPageRoute(builder: (_) => const TrashScreen()));
+    _reload();
+  }
+
+  /// Nieuwe (versleutelde, als de map in een kluis ligt) notitie.
+  Future<void> _newNote() async {
+    final dir = _dir;
+    if (dir == null) return;
+    final stamp = DateFormat('yyyy-MM-dd HH.mm').format(DateTime.now());
+    final name = await askText(context,
+        title: 'Nieuwe notitie', initial: 'Notitie $stamp.txt', confirm: 'Maken');
+    if (name == null || name.isEmpty || !mounted) return;
+    final plain = name.contains('.') ? name : '$name.txt';
+    final key = vaults.keyForDir(dir);
+    final inVault = vaults.vaultRootFor(dir) != null;
+    try {
+      final file = VaultManager.uniqueFile(dir, plain,
+          encryptWith: inVault ? key : null);
+      await MemoryFiles.writeText(file, '', inVault ? key : null);
+      if (!mounted) return;
+      await Navigator.push(
+          context,
+          MaterialPageRoute(
+              builder: (_) => TextEditorScreen(
+                  file: file, name: VaultCrypto.plainName(p.basename(file.path), key))));
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
     _reload();
   }
 
@@ -829,6 +884,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   await _removeVault(root!);
                 case 'refresh':
                   _reload();
+                case 'trash':
+                  await _openTrash();
+                case 'dupes':
+                  await Navigator.push(context,
+                      MaterialPageRoute(builder: (_) => DuplicatesScreen(dir: Directory(dir))));
+                  _reload();
+                case 'usage':
+                  await Navigator.push(context,
+                      MaterialPageRoute(builder: (_) => StorageScreen(dir: Directory(dir))));
               }
             },
             itemBuilder: (_) => [
@@ -852,6 +916,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   checked: _showHidden,
                   child: const Text('Verborgen bestanden')),
               const PopupMenuItem(value: 'refresh', child: Text('Vernieuwen')),
+              if (!_vaultLocked) ...[
+                const PopupMenuDivider(),
+                const PopupMenuItem(value: 'dupes', child: Text('Duplicaten zoeken')),
+                const PopupMenuItem(value: 'usage', child: Text('Opslaganalyse')),
+              ],
+              const PopupMenuItem(value: 'trash', child: Text('Prullenbak')),
               if (root != null && !_vaultLocked) ...[
                 const PopupMenuDivider(),
                 const PopupMenuItem(
@@ -1179,6 +1249,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
       for (final (name, icon, path) in quick)
         ListTile(
             leading: Icon(icon), title: Text(name), onTap: () => _open(path)),
+      const Divider(),
+      ListTile(
+          leading: const Icon(Icons.delete_outline),
+          title: const Text('Prullenbak'),
+          onTap: _openTrash),
     ]);
   }
 

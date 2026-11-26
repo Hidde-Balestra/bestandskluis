@@ -4,15 +4,16 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:photo_manager/photo_manager.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../app_services.dart';
 import '../crypto/vault_crypto.dart';
 import '../crypto/vault_manager.dart';
 import '../services/temp_files.dart';
+import '../services/trash.dart';
 import '../util/format.dart';
 import '../widgets/dialogs.dart';
 import '../widgets/encrypted_thumb.dart';
+import '../widgets/media_items.dart';
 import 'media_viewer.dart';
 
 class GalleryScreen extends StatefulWidget {
@@ -31,6 +32,10 @@ class _GalleryScreenState extends State<GalleryScreen> {
 
   /// null = apparaatalbum, true = media uit ontgrendelde kluizen.
   bool _vaultMode = false;
+
+  /// Filter in de kluizen: null = alles, '' = favorieten, anders een album.
+  String? _vaultFilter;
+  List<String> _albums2 = [];
   final List<AssetEntity> _assets = [];
   List<File> _vaultFiles = [];
   int _page = 0;
@@ -115,6 +120,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
         await for (final e
             in Directory(root).list(recursive: true, followLinks: false)) {
           final name = p.basename(e.path);
+          if (Trash.isTrashPath(e.path)) continue;
           if (e is File &&
               VaultCrypto.isEncryptedName(name) &&
               isMedia(VaultCrypto.plainName(
@@ -127,6 +133,20 @@ class _GalleryScreenState extends State<GalleryScreen> {
       }
     }
     files.sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
+    // Filter: favorieten of een album.
+    final filter = _vaultFilter;
+    if (filter != null) {
+      final keep = <File>[];
+      for (final f in files) {
+        if (await services.meta.contains(f, filter.isEmpty ? null : filter)) {
+          keep.add(f);
+        }
+      }
+      files
+        ..clear()
+        ..addAll(keep);
+    }
+    _albums2 = await services.meta.albumNames().catchError((_) => <String>[]);
     if (!mounted) return;
     setState(() {
       _vaultFiles = files;
@@ -151,10 +171,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
               },
               share: () async {
                 final f = await a.file;
-                if (f != null) {
-                  await SharePlus.instance
-                      .share(ShareParams(files: [XFile(f.path)]));
-                }
+                if (f != null) await TempFiles.share([f], services.vaults);
               },
               delete: () async =>
                   (await PhotoManager.editor.deleteWithIds([a.id])).isNotEmpty,
@@ -168,21 +185,12 @@ class _GalleryScreenState extends State<GalleryScreen> {
   }
 
   Future<void> _openVaultFile(int index) async {
-    final items = _vaultFiles.map((f) {
-      final name = VaultCrypto.plainName(
-          p.basename(f.path), services.ops.keyForFile(f));
-      return MediaItem(
-        name: name,
-        isVideo: kindOf(name) == FileKind.video,
-        encrypted: true,
-        load: () => TempFiles.plainFor(f, services.ops.keyForFile(f)),
-        share: () => TempFiles.share([f], services.vaults).then((_) {}),
-        delete: () async {
-          await services.ops.delete([f]);
-          return true;
-        },
-      );
-    }).toList();
+    final items = _vaultFiles
+        .map((f) => mediaItemForFile(
+            f,
+            VaultCrypto.plainName(p.basename(f.path), services.ops.keyForFile(f)),
+            encrypted: true))
+        .toList();
     final deleted = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
@@ -197,7 +205,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
     final ok = await confirmDialog(context,
         title: 'Verwijderen',
         message: _vaultMode
-            ? '$n versleuteld(e) item(s) permanent verwijderen?'
+            ? '$n item(s) naar de prullenbak van de kluis verplaatsen?'
             : '$n item(s) van het toestel verwijderen?',
         confirm: 'Verwijderen',
         destructive: true);
@@ -227,14 +235,130 @@ class _GalleryScreenState extends State<GalleryScreen> {
       }
       return;
     }
-    final files = <XFile>[];
+    final files = <File>[];
     for (final a in _assets.where((a) => _selected.contains(a.id))) {
       final f = await a.file;
-      if (f != null) files.add(XFile(f.path));
+      if (f != null) files.add(f);
     }
-    if (files.isNotEmpty) {
-      await SharePlus.instance.share(ShareParams(files: files));
+    if (files.isNotEmpty) await TempFiles.share(files, services.vaults);
+  }
+
+  // --- Albums en favorieten (kluizen) ---------------------------------------
+
+  List<File> get _selectedVaultFiles =>
+      _vaultFiles.where((f) => _selected.contains(f.path)).toList();
+
+  Future<void> _addToAlbum() async {
+    final names = await services.meta.albumNames();
+    if (!mounted) return;
+    final album = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Aan album toevoegen'),
+        children: [
+          for (final n in names)
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, n), child: Text(n)),
+          SimpleDialogOption(
+            onPressed: () async {
+              final n = await askText(ctx,
+                  title: 'Nieuw album', initial: '', label: 'Naam', confirm: 'Maken');
+              if (ctx.mounted) Navigator.pop(ctx, n);
+            },
+            child: const Row(children: [
+              Icon(Icons.add, size: 18),
+              SizedBox(width: 8),
+              Text('Nieuw album…'),
+            ]),
+          ),
+        ],
+      ),
+    );
+    if (album == null || album.trim().isEmpty || !mounted) return;
+    final files = _selectedVaultFiles;
+    await runWithProgress(context, 'Toevoegen…',
+        (_) => services.meta.addToAlbum(album.trim(), files));
+    if (!mounted) return;
+    showMessage(context, '${files.length} item(s) toegevoegd aan "${album.trim()}"');
+    setState(_selected.clear);
+    await _loadVaultMedia();
+  }
+
+  Future<void> _favoriteSelected() async {
+    final files = _selectedVaultFiles;
+    await runWithProgress(context, 'Favorieten…', (_) async {
+      for (final f in files) {
+        if (!await services.meta.contains(f, null)) {
+          await services.meta.toggleFavorite(f);
+        }
+      }
+    });
+    if (!mounted) return;
+    showMessage(context, '${files.length} item(s) bij favorieten');
+    setState(_selected.clear);
+    await _loadVaultMedia();
+  }
+
+  Future<void> _removeFromAlbum() async {
+    final album = _vaultFilter;
+    if (album == null) return;
+    final files = _selectedVaultFiles;
+    if (album.isEmpty) {
+      for (final f in files) {
+        if (await services.meta.contains(f, null)) {
+          await services.meta.toggleFavorite(f);
+        }
+      }
+    } else {
+      await services.meta.removeFromAlbum(album, files);
     }
+    if (!mounted) return;
+    setState(_selected.clear);
+    await _loadVaultMedia();
+  }
+
+  Widget _vaultFilterBar() {
+    Widget chip(String label, String? value, {IconData? icon}) => Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: ChoiceChip(
+            avatar: icon == null ? null : Icon(icon, size: 16),
+            label: Text(label),
+            selected: _vaultFilter == value,
+            onSelected: (_) {
+              setState(() {
+                _vaultFilter = value;
+                _selected.clear();
+              });
+              _loadVaultMedia();
+            },
+          ),
+        );
+    return SizedBox(
+      height: 48,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        children: [
+          chip('Alles', null),
+          chip('Favorieten', '', icon: Icons.star),
+          for (final a in _albums2)
+            GestureDetector(
+              onLongPress: () async {
+                final ok = await confirmDialog(context,
+                    title: 'Album "$a" verwijderen?',
+                    message: 'De foto\'s zelf blijven in de kluis.',
+                    confirm: 'Album verwijderen',
+                    destructive: true);
+                if (!ok) return;
+                await services.meta.deleteAlbum(a);
+                if (_vaultFilter == a) _vaultFilter = null;
+                await _loadVaultMedia();
+              },
+              child: chip(a, a, icon: Icons.photo_album_outlined),
+            ),
+        ],
+      ),
+    );
   }
 
   void _toggle(String id) => setState(() {
@@ -333,6 +457,26 @@ class _GalleryScreenState extends State<GalleryScreen> {
                     icon: const Icon(Icons.enhanced_encryption),
                     onPressed: _moveToVault,
                   ),
+                if (_vaultMode)
+                  IconButton(
+                    tooltip: 'Aan album toevoegen',
+                    icon: const Icon(Icons.photo_album_outlined),
+                    onPressed: _addToAlbum,
+                  ),
+                if (_vaultMode)
+                  IconButton(
+                    tooltip: 'Favoriet maken',
+                    icon: const Icon(Icons.star_border),
+                    onPressed: _favoriteSelected,
+                  ),
+                if (_vaultMode && _vaultFilter != null)
+                  IconButton(
+                    tooltip: _vaultFilter!.isEmpty
+                        ? 'Uit favorieten halen'
+                        : 'Uit album halen',
+                    icon: const Icon(Icons.remove_circle_outline),
+                    onPressed: _removeFromAlbum,
+                  ),
                 IconButton(
                   tooltip: 'Verwijderen',
                   icon: const Icon(Icons.delete_outline),
@@ -349,6 +493,8 @@ class _GalleryScreenState extends State<GalleryScreen> {
             ]),
       body: Column(children: [
         if (!selecting) _albumBar(),
+        if (!selecting && _vaultMode && services.vaults.unlockedVaults.isNotEmpty)
+          _vaultFilterBar(),
         Expanded(child: _vaultMode ? _vaultGrid() : _deviceGrid()),
       ]),
     );

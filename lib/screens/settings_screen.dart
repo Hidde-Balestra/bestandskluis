@@ -4,7 +4,11 @@ import 'package:path/path.dart' as p;
 
 import '../app_services.dart';
 import '../services/backup.dart';
+import 'dart:io';
+
 import '../services/camera_mover.dart';
+import '../services/storage.dart';
+import 'tools_screens.dart';
 import '../services/ftp_controller.dart';
 import '../services/intruders.dart';
 import '../services/settings.dart';
@@ -211,6 +215,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onTap: _chooseAutoLock,
             ),
             SwitchListTile(
+              secondary: const Icon(Icons.screen_lock_portrait_outlined),
+              title: const Text('Vergrendelen als het scherm uitgaat'),
+              value: settings.lockOnScreenOff,
+              onChanged: settings.setLockOnScreenOff,
+            ),
+            SwitchListTile(
+              secondary: const Icon(Icons.flip_to_back),
+              title: const Text('Vergrendelen bij omdraaien'),
+              subtitle: const Text(
+                  'Leg de telefoon met het scherm naar beneden en alle kluizen gaan op slot'),
+              value: settings.lockOnFaceDown,
+              onChanged: settings.setLockOnFaceDown,
+            ),
+            SwitchListTile(
+              secondary: const Icon(Icons.location_off_outlined),
+              title: const Text('Locatie en EXIF verwijderen bij delen'),
+              subtitle: const Text(
+                  'Foto\'s (JPEG/PNG) gaan zonder GPS-locatie, cameragegevens en '
+                  'datum de deur uit. Het origineel blijft ongewijzigd.'),
+              value: settings.stripMetadata,
+              onChanged: settings.setStripMetadata,
+            ),
+            SwitchListTile(
               secondary: const Icon(Icons.screenshot_monitor_outlined),
               title: const Text('Schermbeveiliging'),
               subtitle: const Text(
@@ -257,6 +284,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       '${_date.format(services.intruders.events.first.time)}'),
               enabled: services.intruders.events.isNotEmpty,
               onTap: _openIntruders,
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('Prullenbak'),
+              subtitle: const Text('Verwijderde bestanden 30 dagen terugzetten'),
+              onTap: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => const TrashScreen())),
+            ),
+            const ListTile(
+              leading: Icon(Icons.widgets_outlined),
+              title: Text('Widget op het startscherm'),
+              subtitle: Text(
+                  'Houd je startscherm ingedrukt → Widgets → Bestandskluis. '
+                  'Met "Vergrendelen" gaan alle kluizen op slot; "Kluis openen" '
+                  'opent de laatst gebruikte kluis (met je vingerafdruk als dat aan staat).'),
             ),
             const Divider(),
             const _BackupSection(),
@@ -368,6 +410,55 @@ class _BackupSectionState extends State<_BackupSection> {
     if (r != null && mounted) showMessage(context, r.summary);
   }
 
+  /// Kluis terughalen van de back-upserver (bijv. op een nieuwe telefoon).
+  Future<void> _restore() async {
+    final listed = await runWithProgress(context, 'Verbinden…', (_) async {
+      final (client, base) = await BackupService.connectConfigured();
+      try {
+        return (await VaultRestore.remoteVaults(client, base), base);
+      } finally {
+        await client.quit();
+      }
+    });
+    if (listed == null || !mounted) return;
+    final (names, base) = listed;
+    if (names.isEmpty) {
+      showMessage(context, 'Geen kluizen gevonden in $base');
+      return;
+    }
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Welke kluis terugzetten?'),
+        children: [
+          for (final n in names)
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, n), child: Text(n)),
+        ],
+      ),
+    );
+    if (choice == null || !mounted) return;
+    final roots = await Storage.roots();
+    final parent = p.join(roots.first.path, 'Kluizen');
+    await Directory(parent).create(recursive: true);
+    if (!mounted) return;
+    final path = await runWithProgress(context, 'Terugzetten…', (update) async {
+      final (client, _) = await BackupService.connectConfigured();
+      try {
+        return await VaultRestore.restore(
+            client, p.posix.join(base, choice), parent,
+            onFile: update);
+      } finally {
+        await client.quit();
+      }
+    });
+    if (path == null || !mounted) return;
+    await services.known.add(path);
+    if (!mounted) return;
+    showMessage(context,
+        'Teruggezet naar ${p.basename(path)}. Ontgrendel hem met het wachtwoord of de herstelcode.');
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = b.connection;
@@ -415,6 +506,13 @@ class _BackupSectionState extends State<_BackupSection> {
             : 'Laatste: ${_date.format(b.lastRun!)} — ${b.lastResult ?? ''}'),
         enabled: ready,
         onTap: _runNow,
+      ),
+      ListTile(
+        leading: const Icon(Icons.settings_backup_restore),
+        title: const Text('Kluis terugzetten uit back-up'),
+        subtitle: const Text('Bijvoorbeeld op een nieuwe telefoon'),
+        enabled: c != null,
+        onTap: _restore,
       ),
     ]);
   }

@@ -13,6 +13,7 @@ sealed class Incoming {
           ((raw['paden'] as List?) ?? const []).cast<String>().toList()),
       'ftp' => FtpLink(raw['url'] as String),
       'stopFtp' => const StopFtp(),
+      'openKluis' => const OpenVault(),
       _ => null,
     };
   }
@@ -35,6 +36,11 @@ class StopFtp extends Incoming {
   const StopFtp();
 }
 
+/// "Kluis openen" in de widget.
+class OpenVault extends Incoming {
+  const OpenVault();
+}
+
 /// Verbinding met de Android-kant (MainActivity / FtpService).
 class SystemBridge {
   SystemBridge._();
@@ -44,11 +50,18 @@ class SystemBridge {
 
   static Stream<Incoming> get incoming => _incoming.stream;
 
+  static final _lock = StreamController<String>.broadcast();
+
+  /// Verzoeken om alles te vergrendelen (widget, scherm uit, omgedraaid).
+  static Stream<String> get lockRequests => _lock.stream;
+
   static void init() {
     _ch.setMethodCallHandler((call) async {
       if (call.method == 'binnenkomend') {
         final i = Incoming.fromMap(call.arguments);
         if (i != null) _incoming.add(i);
+      } else if (call.method == 'vergrendelAlles') {
+        _lock.add('${call.arguments ?? ''}');
       }
     });
   }
@@ -103,6 +116,11 @@ class SystemBridge {
       return null;
     }
   }
+
+  /// Automatisch vergrendelen als het scherm uitgaat en/of de telefoon
+  /// met het scherm naar beneden wordt gelegd.
+  static Future<void> setLockTriggers({required bool screenOff, required bool faceDown}) =>
+      _call('vergrendelInstellingen', {'schermUit': screenOff, 'omdraaien': faceDown});
 
   /// App naar de achtergrond in plaats van afsluiten.
   static Future<void> moveToBack() => _call('naarAchtergrond');

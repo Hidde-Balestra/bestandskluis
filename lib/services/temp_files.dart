@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../crypto/vault_crypto.dart';
+import 'metadata_strip.dart';
 import 'thumbnails.dart';
 import '../crypto/vault_manager.dart';
 
@@ -49,30 +50,45 @@ class TempFiles {
     return out;
   }
 
+  /// Locatie/EXIF uit foto's halen bij delen (instelling).
+  static bool stripMetadata = true;
+
   /// Deelt bestanden; bestanden uit een kluis worden tijdelijk ontsleuteld.
+  /// Met [stripMetadata] gaan foto's zonder locatie en EXIF de deur uit.
   static Future<ShareResult> share(List<File> files, VaultManager vaults,
       {void Function(int done, int total)? onProgress}) async {
     Directory? shareDir;
+    Future<Directory> shareTo() async => shareDir ??= await Directory(p.join(
+            (await _dir('gedeeld')).path,
+            '${DateTime.now().millisecondsSinceEpoch}'))
+        .create(recursive: true);
     final out = <XFile>[];
     for (var i = 0; i < files.length; i++) {
       onProgress?.call(i, files.length);
       final f = files[i];
       final name = p.basename(f.path);
+      var readable = f;
+      var plainName = name;
       if (VaultCrypto.isEncryptedName(name) &&
           vaults.vaultRootFor(f.parent.path) != null) {
         final key = vaults.keyForDir(f.parent.path);
         if (key == null) throw StateError('Kluis is vergrendeld');
-        shareDir ??= await Directory(p.join((await _dir('gedeeld')).path,
-                '${DateTime.now().millisecondsSinceEpoch}'))
-            .create(recursive: true);
-        final target =
-            VaultManager.uniqueFile(
-            shareDir.path, VaultCrypto.plainName(name, key));
-        await VaultCrypto.decryptFile(f, target, key);
-        out.add(XFile(target.path));
-      } else {
-        out.add(XFile(f.path));
+        plainName = VaultCrypto.plainName(name, key);
+        readable = VaultManager.uniqueFile((await shareTo()).path, plainName);
+        await VaultCrypto.decryptFile(f, readable, key);
       }
+      if (stripMetadata && MetadataStrip.supports(plainName)) {
+        final clean = readable.parent.path == shareDir?.path
+            ? readable // al een tijdelijke kopie: ter plekke opschonen
+            : VaultManager.uniqueFile((await shareTo()).path, plainName);
+        try {
+          await MetadataStrip.stripFile(readable, clean);
+          readable = clean;
+        } catch (_) {
+          // Onleesbare foto: ongewijzigd delen.
+        }
+      }
+      out.add(XFile(readable.path));
     }
     onProgress?.call(files.length, files.length);
     final result = await SharePlus.instance.share(ShareParams(files: out));

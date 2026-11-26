@@ -64,6 +64,7 @@ Future<bool> unlockVault(BuildContext context, String root) async {
 
 Future<void> _succeeded(BuildContext context, String root) async {
   await services.known.add(root);
+  await services.settings.setLastVault(root);
   final n = _failures.remove(p.normalize(root)) ?? 0;
   final total = await services.intruders.unseenCount();
   if (!context.mounted) return;
